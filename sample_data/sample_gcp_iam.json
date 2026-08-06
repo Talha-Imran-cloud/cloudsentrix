@@ -1,0 +1,35 @@
+{
+  "bindings": [
+    {
+      "role": "roles/owner",
+      "members": [
+        "user:admin@company.com"
+      ]
+    },
+    {
+      "role": "roles/editor",
+      "members": [
+        "user:intern@company.com",
+        "serviceAccount:app-backend@my-project.iam.gserviceaccount.com"
+      ]
+    },
+    {
+      "role": "roles/iam.serviceAccountTokenCreator",
+      "members": [
+        "serviceAccount:app-backend@my-project.iam.gserviceaccount.com"
+      ]
+    },
+    {
+      "role": "roles/iam.serviceAccountUser",
+      "members": [
+        "user:intern@company.com"
+      ]
+    },
+    {
+      "role": "roles/viewer",
+      "members": [
+        "user:analyst@company.com"
+      ]
+    }
+  ]
+}

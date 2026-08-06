@@ -1,0 +1,26 @@
+Metadata-Version: 2.4
+Name: cloudsentrix
+Version: 1.0.0
+Summary: GCP IAM Privilege-Escalation Attack-Path Analyzer
+License: MIT
+Project-URL: Homepage, https://github.com/your-username/cloudpath-project
+Project-URL: Repository, https://github.com/your-username/cloudpath-project
+Project-URL: Issues, https://github.com/your-username/cloudpath-project/issues
+Keywords: gcp,iam,security,cloud,privilege-escalation
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Developers
+Classifier: Intended Audience :: System Administrators
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Security
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: networkx>=3.0
+Requires-Dist: rich>=13.0
+Requires-Dist: reportlab>=4.0
+Provides-Extra: dev
+Requires-Dist: pytest>=9.0; extra == "dev"
+Requires-Dist: pytest-cov>=7.0; extra == "dev"

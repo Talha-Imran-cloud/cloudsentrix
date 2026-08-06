@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cloudsentrix"
+version = "1.0.0"
+description = "GCP IAM Privilege-Escalation Attack-Path Analyzer"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["gcp", "iam", "security", "cloud", "privilege-escalation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
+dependencies = [
+    "networkx>=3.0",
+    "rich>=13.0",
+    "reportlab>=4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0",
+    "pytest-cov>=7.0",
+]
+
+[project.scripts]
+cloudsentrix = "cli:main"
+
+[project.urls]
+Homepage = "https://github.com/your-username/cloudpath-project"
+Repository = "https://github.com/your-username/cloudpath-project"
+Issues = "https://github.com/your-username/cloudpath-project/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["tests/*"]

@@ -1,0 +1,5 @@
+networkx>=3.0
+rich>=13.0
+reportlab>=4.0
+pytest>=9.0
+pytest-cov>=7.0
