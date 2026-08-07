@@ -460,62 +460,7 @@ def _html_escape(text: str) -> str:
 
 
 def export_html(result: ScanResult, output_path: Path) -> None:
-    rows = []
-    for f in result.findings:
-        color = _HTML_SEVERITY_COLOR.get(f.severity.name, "#6b7280")
-        rows.append(
-            "<tr>"
-            f"<td><span class='badge' style='background:{color}'>{f.severity.name}</span></td>"
-            f"<td>{_html_escape(f.title)} ({_html_escape(f.rule_id)})</td>"
-            f"<td>{_html_escape(f.principal_id)}</td>"
-            f"<td>{_html_escape(f.mitre_technique_id)} — {_html_escape(f.mitre_technique_name)}</td>"
-            f"<td>{_html_escape(f.description)}</td>"
-            "</tr>"
-        )
-
-    blast_rows = []
-    for r in result.blast_radius[:10]:
-        reaches = ", ".join(r.reachable_principals) if r.reachable_principals else "(nothing further)"
-        blast_rows.append(
-            f"<tr><td>{_html_escape(r.principal_id)}</td><td>{r.percentage:.1f}%</td>"
-            f"<td>{_html_escape(reaches)}</td></tr>"
-        )
-
-    html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>CloudSentrix Report — {_html_escape(result.source_file)}</title>
-<style>
-  body {{ font-family: -apple-system, Segoe UI, Roboto, sans-serif; background:#0f172a; color:#e2e8f0; margin:0; padding:2rem; }}
-  h1 {{ font-size:1.4rem; }}
-  h2 {{ font-size:1.1rem; margin-top:2rem; }}
-  .score {{ font-size:2rem; font-weight:bold; }}
-  table {{ width:100%; border-collapse:collapse; margin-top:1rem; }}
-  th, td {{ text-align:left; padding:.5rem .75rem; border-bottom:1px solid #334155; font-size:.9rem; vertical-align:top; }}
-  th {{ color:#94a3b8; text-transform:uppercase; font-size:.75rem; }}
-  .badge {{ color:white; padding:.15rem .5rem; border-radius:.25rem; font-size:.75rem; font-weight:600; white-space:nowrap; }}
-  .meta {{ color:#94a3b8; font-size:.85rem; }}
-</style>
-</head>
-<body>
-  <h1>CloudSentrix — GCP IAM Privilege-Escalation Report</h1>
-  <p class="meta">Source: {_html_escape(result.source_file)} &nbsp;|&nbsp; Generated: {datetime.now(timezone.utc).isoformat()}</p>
-  <p class="score">{result.risk.score}/100 — {_html_escape(result.risk.rating.value)}</p>
-  <h2>Findings ({len(result.findings)})</h2>
-  <table>
-    <tr><th>Severity</th><th>Finding</th><th>Principal</th><th>MITRE</th><th>Details</th></tr>
-    {''.join(rows) if rows else '<tr><td colspan="5">No findings.</td></tr>'}
-  </table>
-  <h2>Blast Radius (top 10)</h2>
-  <table>
-    <tr><th>Principal</th><th>%</th><th>Can Reach</th></tr>
-    {''.join(blast_rows) if blast_rows else '<tr><td colspan="3">No data.</td></tr>'}
-  </table>
-</body>
-</html>
-"""
-    output_path.write_text(html, encoding="utf-8")
+    output_path.write_text(build_html_export(result), encoding="utf-8")
 
 
 def export_sarif(result: ScanResult, output_path: Path) -> None:
@@ -633,181 +578,328 @@ def build_json_export(result: "ScanResult") -> dict:
     }
 
 
+RULE_CATEGORY: dict[str, str] = {
+    "GCP-001": "Public Access",
+    "GCP-002": "Service Account Risks",
+    "GCP-003": "Service Account Risks",
+    "GCP-004": "Overly Permissive Roles",
+    "GCP-005": "Privilege Escalation",
+}
+
+CATEGORY_COLOR: dict[str, str] = {
+    "Privilege Escalation": "#dc2626",
+    "Overly Permissive Roles": "#ea580c",
+    "Service Account Risks": "#ca8a04",
+    "Public Access": "#3b82f6",
+}
+
+SEVERITY_HEX: dict[str, str] = {
+    "CRITICAL": "#dc2626", "HIGH": "#ea580c", "MEDIUM": "#ca8a04", "LOW": "#22c55e",
+}
+
+DASHBOARD_CSS = """
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#0b1120;color:#e2e8f0;padding:1.75rem;min-height:100vh}
+.header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.5rem;flex-wrap:wrap;gap:.75rem}
+.header h1{font-size:1.55rem;font-weight:700;color:#f8fafc}
+.header .meta{color:#64748b;font-size:.82rem;margin-top:.25rem}
+
+.score-row{display:grid;grid-template-columns:1.4fr repeat(5,1fr);gap:1rem;margin-bottom:1.25rem}
+.score-card{background:#141b2d;border-radius:10px;padding:1.1rem 1.2rem;border:1px solid #23304a}
+.score-card .label{font-size:.72rem;color:#64748b;text-transform:uppercase;letter-spacing:.05em;display:flex;align-items:center;gap:.4rem}
+.score-card .value{font-size:1.75rem;font-weight:700;margin-top:.35rem;line-height:1}
+.score-card .sub{font-size:.76rem;color:#94a3b8;margin-top:.3rem}
+.score-bar-bg{background:#1e293b;border-radius:4px;height:6px;margin-top:.6rem;overflow:hidden}
+.score-bar-fill{height:100%;border-radius:4px}
+
+.grid-3{display:grid;grid-template-columns:1fr 1.3fr 1.3fr;gap:1.1rem;margin-bottom:1.1rem}
+.panel{background:#141b2d;border-radius:10px;padding:1.15rem 1.25rem;border:1px solid #23304a}
+.panel h2{font-size:.95rem;font-weight:600;color:#f1f5f9;margin-bottom:1rem}
+
+.donut-wrap{display:flex;align-items:center;gap:1.3rem}
+.donut{width:130px;height:130px;border-radius:50%;position:relative;flex-shrink:0}
+.donut::after{content:"";position:absolute;inset:20px;background:#141b2d;border-radius:50%;
+  display:flex;align-items:center;justify-content:center}
+.donut-center{position:absolute;inset:20px;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;text-align:center}
+.donut-center .n{font-size:1.5rem;font-weight:700}
+.donut-center .t{font-size:.62rem;color:#64748b;text-transform:uppercase}
+.donut-legend{display:flex;flex-direction:column;gap:.5rem}
+.donut-legend-item{display:flex;align-items:center;gap:.5rem;font-size:.8rem}
+.donut-legend-item .dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.donut-legend-item .pct{margin-left:auto;color:#64748b;font-size:.74rem}
+
+.cat-row{display:flex;align-items:center;gap:.7rem;margin-bottom:.7rem;font-size:.8rem}
+.cat-row .cat-label{width:150px;flex-shrink:0;color:#cbd5e1}
+.cat-bar-bg{flex:1;background:#1e293b;border-radius:4px;height:9px;overflow:hidden}
+.cat-bar-fill{height:100%;border-radius:4px}
+.cat-count{width:24px;text-align:right;color:#94a3b8;font-weight:600}
+
+.risky-row{display:flex;justify-content:space-between;align-items:center;padding:.55rem 0;
+  border-bottom:1px solid #1e293b;font-size:.8rem}
+.risky-row:last-child{border-bottom:none}
+.risky-id{color:#cbd5e1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-right:.6rem}
+.badge{color:#fff;padding:.18rem .55rem;border-radius:.3rem;font-size:.68rem;font-weight:700;white-space:nowrap;flex-shrink:0}
+
+.legend{display:flex;gap:1.2rem;margin-bottom:.75rem;flex-wrap:wrap}
+.legend-item{display:flex;align-items:center;gap:.4rem;font-size:.78rem;color:#94a3b8}
+.dot{width:11px;height:11px;border-radius:50%;display:inline-block}
+#graph-canvas{width:100%;height:440px;background:#0b1120;border-radius:6px;display:block;cursor:grab}
+#graph-canvas:active{cursor:grabbing}
+.graph-hint{font-size:.72rem;color:#475569;margin-top:.5rem}
+
+table{width:100%;border-collapse:collapse}
+th{text-align:left;padding:.5rem .75rem;font-size:.7rem;color:#64748b;text-transform:uppercase;border-bottom:1px solid #23304a}
+td{padding:.55rem .75rem;font-size:.81rem;border-bottom:1px solid #1a2540;vertical-align:top}
+tr:hover td{background:#182135}
+small{color:#64748b;display:block;margin-top:.1rem}
+
+.overview-row{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:1.1rem}
+.overview-card{background:#141b2d;border:1px solid #23304a;border-radius:10px;padding:1rem 1.1rem;
+  display:flex;align-items:center;gap:.8rem}
+.overview-icon{font-size:1.5rem}
+.overview-card .n{font-size:1.3rem;font-weight:700}
+.overview-card .t{font-size:.72rem;color:#94a3b8}
+
+.crit-list{list-style:none}
+.crit-item{display:flex;align-items:center;gap:.6rem;padding:.55rem 0;border-bottom:1px solid #1e293b;font-size:.82rem}
+.crit-item:last-child{border-bottom:none}
+.crit-dot{width:8px;height:8px;border-radius:50%;background:#dc2626;flex-shrink:0}
+.crit-text{flex:1;color:#e2e8f0}
+.crit-principal{color:#64748b;font-size:.74rem}
+"""
+
+
 def build_html_export(result: "ScanResult") -> str:
     import json as _json
+    from collections import Counter
 
-    nodes = []
-    edges = []
+    findings = result.findings
+    risk = result.risk
+    graph = result.graph
+    sev_counts = risk.finding_counts
+    total = max(len(findings), 1)
 
-    for pid in result.graph.principal_ids():
-        p = result.graph.get_principal(pid)
-        mtype = p.member_type.value if p else "unknown"
-        is_critical = any(f.principal_id == pid and f.severity.name == "CRITICAL" for f in result.findings)
-        is_high = any(f.principal_id == pid and f.severity.name == "HIGH" for f in result.findings)
+    # -- attack graph data (canvas) — same logic as before, unchanged --------
+    nodes, edges = [], []
+    for pid in graph.principal_ids():
+        p = graph.get_principal(pid)
+        is_critical = any(f.principal_id == pid and f.severity.name == "CRITICAL" for f in findings)
+        is_high = any(f.principal_id == pid and f.severity.name == "HIGH" for f in findings)
         color = "#dc2626" if is_critical else "#ea580c" if is_high else "#3b82f6"
         nodes.append({"id": pid, "label": pid.split("@")[0], "title": pid, "color": color, "shape": "ellipse"})
-
-    for rid in result.graph.role_ids():
+    for rid in graph.role_ids():
         nodes.append({"id": rid, "label": rid.replace("roles/", ""), "title": rid, "color": "#475569", "shape": "box"})
-
-    for pid in result.graph.principal_ids():
-        for role in result.graph.roles_of(pid):
+    for pid in graph.principal_ids():
+        for role in graph.roles_of(pid):
             edges.append({"from": pid, "to": role, "color": "#475569", "dashes": False, "label": ""})
-
     for src, tgt, rule_id in result.escalation_edges:
         edges.append({"from": src, "to": tgt, "color": "#dc2626", "dashes": True, "label": rule_id})
+    graph_data = _json.dumps({"nodes": nodes, "edges": edges})
 
-    sev_counts = result.risk.finding_counts
+    # -- score cards row -------------------------------------------------------
+    rating_color = {"Excellent": "#22c55e", "Good": "#22c55e", "Fair": "#ca8a04",
+                     "Poor": "#ea580c", "Critical": "#dc2626"}.get(risk.rating.value, "#f59e0b")
+
+    def _mini_card(label: str, value, color: str, sub: str) -> str:
+        return (f'<div class="score-card"><div class="label">{label}</div>'
+                f'<div class="value" style="color:{color}">{value}</div>'
+                f'<div class="sub">{sub}</div></div>')
+
+    score_cards = (
+        f'<div class="score-card"><div class="label">🛡️ Security Score</div>'
+        f'<div class="value" style="color:{rating_color}">{risk.score}/100</div>'
+        f'<div class="sub">{risk.rating.value}</div>'
+        f'<div class="score-bar-bg"><div class="score-bar-fill" '
+        f'style="width:{risk.score}%;background:{rating_color}"></div></div></div>'
+        + _mini_card("📋 Total Findings", len(findings), "#60a5fa", "Across all severity levels")
+        + _mini_card("🔴 Critical", sev_counts.get("CRITICAL", 0), SEVERITY_HEX["CRITICAL"],
+                     f"{round(sev_counts.get('CRITICAL', 0) / total * 100)}% of findings")
+        + _mini_card("🟠 High", sev_counts.get("HIGH", 0), SEVERITY_HEX["HIGH"],
+                     f"{round(sev_counts.get('HIGH', 0) / total * 100)}% of findings")
+        + _mini_card("🟡 Medium", sev_counts.get("MEDIUM", 0), SEVERITY_HEX["MEDIUM"],
+                     f"{round(sev_counts.get('MEDIUM', 0) / total * 100)}% of findings")
+        + _mini_card("🟢 Low", sev_counts.get("LOW", 0), SEVERITY_HEX["LOW"],
+                     f"{round(sev_counts.get('LOW', 0) / total * 100)}% of findings")
+    )
+
+    # -- donut chart (findings by severity) -------------------------------------
+    order = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
+    cum = 0.0
+    stops = []
+    for sev in order:
+        cnt = sev_counts.get(sev, 0)
+        if cnt == 0:
+            continue
+        start = cum
+        cum += (cnt / total) * 100
+        stops.append(f"{SEVERITY_HEX[sev]} {start:.2f}% {cum:.2f}%")
+    gradient = ", ".join(stops) if stops else "#1e293b 0% 100%"
+
+    donut_legend = "".join(
+        f'<div class="donut-legend-item"><span class="dot" style="background:{SEVERITY_HEX[sev]}"></span>'
+        f'{sev.title()}<span class="pct">{sev_counts.get(sev, 0)} ({round(sev_counts.get(sev, 0) / total * 100)}%)</span></div>'
+        for sev in order
+    )
+
+    donut_html = (
+        '<div class="panel"><h2>Findings by Severity</h2><div class="donut-wrap">'
+        f'<div class="donut" style="background:conic-gradient({gradient})">'
+        f'<div class="donut-center"><div class="n">{len(findings)}</div><div class="t">Total</div></div>'
+        '</div>'
+        f'<div class="donut-legend">{donut_legend}</div>'
+        '</div></div>'
+    )
+
+    # -- findings by category (bars) ---------------------------------------------
+    cat_counts: Counter = Counter(RULE_CATEGORY.get(f.rule_id, "Other") for f in findings)
+    max_cat = max(cat_counts.values(), default=1)
+    cat_rows = "".join(
+        f'<div class="cat-row"><span class="cat-label">{_html_escape(cat)}</span>'
+        f'<div class="cat-bar-bg"><div class="cat-bar-fill" style="width:{cnt / max_cat * 100:.0f}%;'
+        f'background:{CATEGORY_COLOR.get(cat, "#64748b")}"></div></div>'
+        f'<span class="cat-count">{cnt}</span></div>'
+        for cat, cnt in cat_counts.most_common()
+    )
+    category_html = f'<div class="panel"><h2>Findings by Category</h2>{cat_rows or "<p style=\'color:#64748b;font-size:.8rem\'>No findings.</p>"}</div>'
+
+    # -- top 5 risky principals -----------------------------------------------
+    worst_severity: dict[str, Severity] = {}
+    for f in findings:
+        cur = worst_severity.get(f.principal_id)
+        if cur is None or f.severity > cur:
+            worst_severity[f.principal_id] = f.severity
+    blast_by_id = {r.principal_id: r for r in result.blast_radius}
+    ranked = sorted(
+        worst_severity.items(),
+        key=lambda kv: (kv[1], blast_by_id[kv[0]].percentage if kv[0] in blast_by_id else 0),
+        reverse=True,
+    )[:5]
+    risky_rows = "".join(
+        f'<div class="risky-row"><span class="risky-id">{_html_escape(pid)}</span>'
+        f'<span class="badge" style="background:{SEVERITY_HEX.get(sev.name, "#64748b")}">{sev.name}</span></div>'
+        for pid, sev in ranked
+    )
+    top_risky_html = f'<div class="panel"><h2>Top 5 Risky Principals</h2>{risky_rows or "<p style=\'color:#64748b;font-size:.8rem\'>No findings.</p>"}</div>'
+
+    # -- MITRE ATT&CK mapping table -----------------------------------------------
+    mitre_counts: Counter = Counter()
+    mitre_names: dict[str, str] = {}
+    for f in findings:
+        mitre_counts[f.mitre_technique_id] += 1
+        mitre_names[f.mitre_technique_id] = f.mitre_technique_name
+    mitre_rows = "".join(
+        f'<tr><td>{_html_escape(mitre_names[tid])}</td><td><code>{tid}</code></td>'
+        f'<td style="text-align:right;font-weight:700">{cnt}</td></tr>'
+        for tid, cnt in mitre_counts.most_common()
+    )
+    mitre_html = (
+        '<div class="panel"><h2>MITRE ATT&CK Mapping</h2><table>'
+        '<tr><th>Technique</th><th>ID</th><th style="text-align:right">Count</th></tr>'
+        + (mitre_rows or '<tr><td colspan="3" style="color:#64748b">No findings.</td></tr>')
+        + '</table></div>'
+    )
+
+    # -- blast radius overview cards -----------------------------------------------
+    at_risk = [r for r in result.blast_radius if r.percentage > 0]
+    sa_at_risk = sum(
+        1 for r in at_risk
+        if (p := graph.get_principal(r.principal_id)) is not None and p.member_type.value == "serviceAccount"
+    )
+    max_blast = max((r.percentage for r in result.blast_radius), default=0.0)
+    overview_html = (
+        '<div class="overview-row">'
+        f'<div class="overview-card"><span class="overview-icon">🧭</span><div><div class="n">{len(at_risk)}</div>'
+        '<div class="t">Principals at Risk</div></div></div>'
+        f'<div class="overview-card"><span class="overview-icon">🤖</span><div><div class="n">{sa_at_risk}</div>'
+        '<div class="t">Service Accounts at Risk</div></div></div>'
+        f'<div class="overview-card"><span class="overview-icon">🔗</span><div><div class="n">{len(result.escalation_edges)}</div>'
+        '<div class="t">Escalation Paths</div></div></div>'
+        f'<div class="overview-card"><span class="overview-icon">💥</span><div><div class="n">{max_blast:.0f}%</div>'
+        '<div class="t">Max Blast Radius</div></div></div>'
+        '</div>'
+    )
+
+    # -- recent critical/high findings list -----------------------------------------
+    top_findings = [f for f in findings if f.severity.name in ("CRITICAL", "HIGH")][:5]
+    crit_items = "".join(
+        f'<li class="crit-item"><span class="crit-dot" style="background:{SEVERITY_HEX[f.severity.name]}"></span>'
+        f'<span class="crit-text">{_html_escape(f.title)}<div class="crit-principal">{_html_escape(f.principal_id)}</div></span></li>'
+        for f in top_findings
+    )
+    critical_list_html = (
+        '<div class="panel"><h2>Recent Critical Findings</h2>'
+        f'<ul class="crit-list">{crit_items or "<p style=\'color:#64748b;font-size:.8rem\'>No critical or high findings.</p>"}</ul>'
+        '</div>'
+    )
+
+    # -- full findings + blast radius tables (unchanged from before) ------------------
     findings_rows = ""
-    for f in result.findings:
-        c = {"CRITICAL":"#dc2626","HIGH":"#ea580c","MEDIUM":"#ca8a04","LOW":"#6b7280"}.get(f.severity.name,"#6b7280")
-        findings_rows += f"<tr><td><span class='badge' style='background:{c}'>{f.severity.name}</span></td><td>{_html_escape(f.title)}<br><small>{f.rule_id}</small></td><td>{_html_escape(f.principal_id)}</td><td>{f.mitre_technique_id}</td><td>{_html_escape(f.description)}</td></tr>"
-
+    for f in findings:
+        c = SEVERITY_HEX.get(f.severity.name, "#6b7280")
+        findings_rows += (
+            f"<tr><td><span class='badge' style='background:{c}'>{f.severity.name}</span></td>"
+            f"<td>{_html_escape(f.title)}<br><small>{f.rule_id}</small></td>"
+            f"<td>{_html_escape(f.principal_id)}</td><td>{f.mitre_technique_id}</td>"
+            f"<td>{_html_escape(f.description)}</td></tr>"
+        )
     blast_rows = ""
     for r in result.blast_radius[:10]:
         reaches = ", ".join(r.reachable_principals) if r.reachable_principals else "(nothing further)"
-        pct_color = "#dc2626" if r.percentage>=75 else "#ea580c" if r.percentage>=33 else "#22c55e"
-        blast_rows += f"<tr><td>{_html_escape(r.principal_id)}</td><td style='color:{pct_color};font-weight:bold'>{r.percentage:.1f}%</td><td>{_html_escape(reaches)}</td></tr>"
+        pct_color = "#dc2626" if r.percentage >= 75 else "#ea580c" if r.percentage >= 33 else "#22c55e"
+        blast_rows += (
+            f"<tr><td>{_html_escape(r.principal_id)}</td>"
+            f"<td style='color:{pct_color};font-weight:bold'>{r.percentage:.1f}%</td>"
+            f"<td>{_html_escape(reaches)}</td></tr>"
+        )
 
-    graph_data = _json.dumps({"nodes": nodes, "edges": edges})
-    rating_color = {"Excellent":"#22c55e","Good":"#22c55e","Fair":"#ca8a04","Poor":"#ea580c","Critical":"#dc2626"}.get(result.risk.rating.value,"#f59e0b")
-
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>CloudSentrix Dashboard</title>
-<style>
-*{{box-sizing:border-box;margin:0;padding:0}}
-body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#0f172a;color:#e2e8f0;padding:1.5rem;min-height:100vh}}
-.header{{margin-bottom:1.5rem}}
-.header h1{{font-size:1.5rem;font-weight:700;color:#f8fafc}}
-.header .meta{{color:#64748b;font-size:.82rem;margin-top:.2rem}}
-.cards{{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:1.5rem}}
-.card{{background:#1e293b;border-radius:8px;padding:1rem;border:1px solid #334155}}
-.card .label{{font-size:.72rem;color:#64748b;text-transform:uppercase;letter-spacing:.05em}}
-.card .value{{font-size:1.6rem;font-weight:700;margin-top:.2rem}}
-.card .sub{{font-size:.78rem;color:#94a3b8;margin-top:.1rem}}
-.section{{background:#1e293b;border-radius:8px;padding:1.2rem;border:1px solid #334155;margin-bottom:1.2rem}}
-.section h2{{font-size:1rem;font-weight:600;margin-bottom:1rem;color:#f1f5f9}}
-.legend{{display:flex;gap:1.2rem;margin-bottom:.75rem;flex-wrap:wrap}}
-.legend-item{{display:flex;align-items:center;gap:.4rem;font-size:.78rem;color:#94a3b8}}
-.dot{{width:11px;height:11px;border-radius:50%;display:inline-block}}
-#graph-canvas{{width:100%;height:460px;background:#0f172a;border-radius:6px;display:block;cursor:grab}}
-#graph-canvas:active{{cursor:grabbing}}
-.graph-hint{{font-size:.72rem;color:#475569;margin-top:.4rem}}
-table{{width:100%;border-collapse:collapse}}
-th{{text-align:left;padding:.5rem .75rem;font-size:.72rem;color:#64748b;text-transform:uppercase;border-bottom:1px solid #334155}}
-td{{padding:.55rem .75rem;font-size:.82rem;border-bottom:1px solid #1e293b;vertical-align:top}}
-tr:hover td{{background:#1e293b}}
-.badge{{color:#fff;padding:.15rem .5rem;border-radius:.25rem;font-size:.72rem;font-weight:700;white-space:nowrap}}
-small{{color:#64748b;display:block}}
-</style>
-</head>
-<body>
-<div class="header">
-  <h1>☁️ CloudSentrix — GCP IAM Security Dashboard</h1>
-  <div class="meta">Source: {_html_escape(result.source_file)} &nbsp;|&nbsp; Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</div>
-</div>
-
-<div class="cards">
-  <div class="card">
-    <div class="label">Security Score</div>
-    <div class="value" style="color:{rating_color}">{result.risk.score}/100</div>
-    <div class="sub">{result.risk.rating.value}</div>
-  </div>
-  <div class="card">
-    <div class="label">Critical Findings</div>
-    <div class="value" style="color:#dc2626">{sev_counts.get('CRITICAL',0)}</div>
-    <div class="sub">Immediate action needed</div>
-  </div>
-  <div class="card">
-    <div class="label">High Findings</div>
-    <div class="value" style="color:#ea580c">{sev_counts.get('HIGH',0)}</div>
-    <div class="sub">Prioritize soon</div>
-  </div>
-  <div class="card">
-    <div class="label">Principals</div>
-    <div class="value" style="color:#3b82f6">{len(result.graph.principal_ids())}</div>
-    <div class="sub">{len(result.graph.role_ids())} roles</div>
-  </div>
-</div>
-
-<div class="section">
-  <h2>🔴 Interactive Attack Graph</h2>
-  <div class="legend">
-    <span class="legend-item"><span class="dot" style="background:#dc2626"></span>CRITICAL</span>
-    <span class="legend-item"><span class="dot" style="background:#ea580c"></span>HIGH</span>
-    <span class="legend-item"><span class="dot" style="background:#3b82f6"></span>Normal</span>
-    <span class="legend-item"><span class="dot" style="background:#475569;border-radius:2px"></span>Role</span>
-    <span class="legend-item"><span style="color:#dc2626">---&gt;</span>&nbsp;Escalation path</span>
-  </div>
-  <canvas id="graph-canvas"></canvas>
-  <div class="graph-hint">Drag to pan &nbsp;|&nbsp; Scroll to zoom &nbsp;|&nbsp; Drag nodes to rearrange &nbsp;|&nbsp; Hover for details</div>
-</div>
-
-<div class="section">
-  <h2>🎯 Findings ({len(result.findings)})</h2>
-  <table>
-    <tr><th>Severity</th><th>Finding</th><th>Principal</th><th>MITRE</th><th>Details</th></tr>
-    {findings_rows or '<tr><td colspan="5" style="color:#64748b">No findings.</td></tr>'}
-  </table>
-</div>
-
-<div class="section">
-  <h2>💥 Blast Radius</h2>
-  <table>
-    <tr><th>Principal</th><th>Blast Radius</th><th>Can Reach</th></tr>
-    {blast_rows or '<tr><td colspan="3" style="color:#64748b">No data.</td></tr>'}
-  </table>
-</div>
-
-<script>
-(function(){{
-var DATA={graph_data};
+    graph_script = """
+(function(){
+var DATA=__GRAPH_DATA__;
 var canvas=document.getElementById("graph-canvas");
 var ctx=canvas.getContext("2d");
-var W,H,zoom=1,pan={{x:0,y:0}};
-var nodeMap={{}};
+var W,H,zoom=1,pan={x:0,y:0};
+var nodeMap={};
 var dragging=null,dragOX=0,dragOY=0;
-var panning=false,panStart={{x:0,y:0}},panBase={{x:0,y:0}};
+var panning=false,panStart={x:0,y:0},panBase={x:0,y:0};
 var hover=null;
 
-function setup(){{
-  W=canvas.offsetWidth||900; H=460;
+function setup(){
+  W=canvas.offsetWidth||900; H=440;
   canvas.width=W; canvas.height=H;
   var cx=W/2,cy=H/2;
-  var ellipseNodes=DATA.nodes.filter(n=>n.shape==="ellipse");
-  var boxNodes=DATA.nodes.filter(n=>n.shape==="box");
+  var ellipseNodes=DATA.nodes.filter(function(n){return n.shape==="ellipse";});
+  var boxNodes=DATA.nodes.filter(function(n){return n.shape==="box";});
   var outerR=Math.min(W,H)*0.35;
   var innerR=Math.min(W,H)*0.14;
-  ellipseNodes.forEach((n,i)=>{{
+  ellipseNodes.forEach(function(n,i){
     var a=(i/Math.max(ellipseNodes.length,1))*2*Math.PI-Math.PI/2;
-    nodeMap[n.id]={{...n,x:cx+outerR*Math.cos(a),y:cy+outerR*Math.sin(a),rx:36,ry:22}};
-  }});
-  boxNodes.forEach((n,i)=>{{
+    nodeMap[n.id]=Object.assign({},n,{x:cx+outerR*Math.cos(a),y:cy+outerR*Math.sin(a),rx:36,ry:22});
+  });
+  boxNodes.forEach(function(n,i){
     var a=(i/Math.max(boxNodes.length,1))*2*Math.PI-Math.PI/2;
-    nodeMap[n.id]={{...n,x:cx+innerR*Math.cos(a),y:cy+innerR*Math.sin(a),rx:28,ry:14}};
-  }});
+    nodeMap[n.id]=Object.assign({},n,{x:cx+innerR*Math.cos(a),y:cy+innerR*Math.sin(a),rx:28,ry:14});
+  });
   draw();
-}}
+}
 
-function ws(x,y){{return{{x:x*zoom+pan.x,y:y*zoom+pan.y}};}}
-function sw(x,y){{return{{x:(x-pan.x)/zoom,y:(y-pan.y)/zoom}};}}
+function ws(x,y){return {x:x*zoom+pan.x,y:y*zoom+pan.y};}
+function sw(x,y){return {x:(x-pan.x)/zoom,y:(y-pan.y)/zoom};}
 
-function hitNode(sx,sy){{
+function hitNode(sx,sy){
   var w=sw(sx,sy);
-  return Object.values(nodeMap).find(n=>{{
-    var dx=(w.x-n.x)/((n.rx+6)*zoom)*zoom,dy=(w.y-n.y)/((n.ry+6)*zoom)*zoom;
-    return dx*dx+dy*dy<=1;
-  }})||null;
-}}
+  var found=null;
+  Object.keys(nodeMap).forEach(function(k){
+    var n=nodeMap[k];
+    var dx=(w.x-n.x)/(n.rx+6),dy=(w.y-n.y)/(n.ry+6);
+    if(dx*dx+dy*dy<=1) found=n;
+  });
+  return found;
+}
 
-function draw(){{
+function draw(){
   ctx.clearRect(0,0,W,H);
-
-  // edges
-  DATA.edges.forEach(e=>{{
+  DATA.edges.forEach(function(e){
     var a=nodeMap[e.from],b=nodeMap[e.to];
     if(!a||!b)return;
     var sa=ws(a.x,a.y),sb=ws(b.x,b.y);
@@ -822,24 +914,21 @@ function draw(){{
     if(e.dashes)ctx.setLineDash([7,4]);
     ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();
     ctx.setLineDash([]);
-    // arrowhead
     var ang=Math.atan2(y2-y1,x2-x1),hs=9;
     ctx.fillStyle=e.color;
     ctx.beginPath();ctx.moveTo(x2,y2);
     ctx.lineTo(x2-hs*Math.cos(ang-.4),y2-hs*Math.sin(ang-.4));
     ctx.lineTo(x2-hs*Math.cos(ang+.4),y2-hs*Math.sin(ang+.4));
     ctx.closePath();ctx.fill();
-    // edge label
-    if(e.dashes&&e.label){{
-      ctx.fillStyle="#fca5a5";ctx.font=`bold ${{Math.max(9,10*zoom)}}px sans-serif`;
+    if(e.dashes&&e.label){
+      ctx.fillStyle="#fca5a5";ctx.font="bold "+Math.max(9,10*zoom)+"px sans-serif";
       ctx.textAlign="center";ctx.textBaseline="middle";
       ctx.fillText(e.label,(x1+x2)/2,(y1+y2)/2-7);
-    }}
+    }
     ctx.restore();
-  }});
-
-  // nodes
-  Object.values(nodeMap).forEach(n=>{{
+  });
+  Object.keys(nodeMap).forEach(function(k){
+    var n=nodeMap[k];
     var s=ws(n.x,n.y);
     var rx=n.rx*zoom,ry=n.ry*zoom;
     var isHover=(hover&&hover.id===n.id);
@@ -847,26 +936,23 @@ function draw(){{
     ctx.shadowColor=n.color;ctx.shadowBlur=isHover?18:6;
     ctx.fillStyle=n.color;
     ctx.beginPath();
-    if(n.shape==="box"){{
+    if(n.shape==="box"){
       var bw=rx*2,bh=ry*2;
       ctx.roundRect(s.x-bw/2,s.y-bh/2,bw,bh,4);
-    }}else{{
+    }else{
       ctx.ellipse(s.x,s.y,rx,ry,0,0,2*Math.PI);
-    }}
+    }
     ctx.fill();
     ctx.shadowBlur=0;
-    // label
     var fs=Math.max(9,Math.min(13,11*zoom));
-    ctx.fillStyle="#fff";ctx.font=`${{n.shape==="box"?"":"bold "}}${{fs}}px sans-serif`;
+    ctx.fillStyle="#fff";ctx.font=(n.shape==="box"?"":"bold ")+fs+"px sans-serif";
     ctx.textAlign="center";ctx.textBaseline="middle";
     var maxW=rx*1.8,txt=n.label;
     if(ctx.measureText(txt).width>maxW)txt=txt.slice(0,Math.floor(txt.length*maxW/ctx.measureText(txt).width)-1)+"…";
     ctx.fillText(txt,s.x,s.y);
     ctx.restore();
-  }});
-
-  // tooltip
-  if(hover){{
+  });
+  if(hover){
     var s=ws(hover.x,hover.y);
     var txt=hover.title;
     ctx.save();
@@ -878,34 +964,94 @@ function draw(){{
     ctx.fillStyle="#e2e8f0";ctx.textAlign="left";ctx.textBaseline="middle";
     ctx.fillText(txt,tx+8,ty+th/2);
     ctx.restore();
-  }}
-}}
+  }
+}
 
-canvas.addEventListener("mousedown",e=>{{
+canvas.addEventListener("mousedown",function(e){
   var r=canvas.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;
   var n=hitNode(mx,my);
-  if(n){{dragging=n;var s=ws(n.x,n.y);dragOX=mx-s.x;dragOY=my-s.y;}}
-  else{{panning=true;panStart={{x:mx,y:my}};panBase={{x:pan.x,y:pan.y}};}}
-}});
-canvas.addEventListener("mousemove",e=>{{
+  if(n){dragging=n;var s=ws(n.x,n.y);dragOX=mx-s.x;dragOY=my-s.y;}
+  else{panning=true;panStart={x:mx,y:my};panBase={x:pan.x,y:pan.y};}
+});
+canvas.addEventListener("mousemove",function(e){
   var r=canvas.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;
-  if(dragging){{var w=sw(mx-dragOX,my-dragOY);dragging.x=w.x;dragging.y=w.y;draw();}}
-  else if(panning){{pan.x=panBase.x+(mx-panStart.x);pan.y=panBase.y+(my-panStart.y);draw();}}
-  else{{var n=hitNode(mx,my);if(n!==hover){{hover=n;draw();}}}}
-}});
-canvas.addEventListener("mouseup",()=>{{dragging=null;panning=false;}});
-canvas.addEventListener("mouseleave",()=>{{dragging=null;panning=false;hover=null;draw();}});
-canvas.addEventListener("wheel",e=>{{
+  if(dragging){var w=sw(mx-dragOX,my-dragOY);dragging.x=w.x;dragging.y=w.y;draw();}
+  else if(panning){pan.x=panBase.x+(mx-panStart.x);pan.y=panBase.y+(my-panStart.y);draw();}
+  else{var n=hitNode(mx,my);if(n!==hover){hover=n;draw();}}
+});
+canvas.addEventListener("mouseup",function(){dragging=null;panning=false;});
+canvas.addEventListener("mouseleave",function(){dragging=null;panning=false;hover=null;draw();});
+canvas.addEventListener("wheel",function(e){
   e.preventDefault();
   var r=canvas.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;
   var f=e.deltaY<0?1.12:.89;
   pan.x=(pan.x-mx)*f+mx;pan.y=(pan.y-my)*f+my;
   zoom=Math.max(.2,Math.min(5,zoom*f));draw();
-}},{{passive:false}});
-window.addEventListener("resize",()=>{{W=canvas.offsetWidth;canvas.width=W;canvas.height=H;draw();}});
+},{passive:false});
+window.addEventListener("resize",function(){W=canvas.offsetWidth;canvas.width=W;canvas.height=H;draw();});
 setup();
-}})();
-</script>
+})();
+""".replace("__GRAPH_DATA__", graph_data)
+
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CloudSentrix Dashboard</title>
+<style>{DASHBOARD_CSS}</style>
+</head>
+<body>
+<div class="header">
+  <div>
+    <h1>Dashboard</h1>
+    <div class="meta">Overview of your GCP security posture</div>
+  </div>
+  <div class="meta" style="text-align:right">
+    Source: {_html_escape(result.source_file)}<br>Generated: {generated_at}
+  </div>
+</div>
+
+<div class="score-row">{score_cards}</div>
+
+<div class="grid-3">{donut_html}{category_html}{top_risky_html}</div>
+
+<div class="panel" style="margin-bottom:1.1rem">
+  <h2>🔴 Interactive Attack Graph</h2>
+  <div class="legend">
+    <span class="legend-item"><span class="dot" style="background:#dc2626"></span>Critical</span>
+    <span class="legend-item"><span class="dot" style="background:#ea580c"></span>High</span>
+    <span class="legend-item"><span class="dot" style="background:#3b82f6"></span>Normal</span>
+    <span class="legend-item"><span class="dot" style="background:#475569;border-radius:2px"></span>Role</span>
+    <span class="legend-item"><span style="color:#dc2626">┈┈&gt;</span>&nbsp;Escalation path</span>
+  </div>
+  <canvas id="graph-canvas"></canvas>
+  <div class="graph-hint">Drag canvas to pan &nbsp;|&nbsp; Scroll to zoom &nbsp;|&nbsp; Drag a node to move it &nbsp;|&nbsp; Hover for details</div>
+</div>
+
+<div class="grid-3" style="grid-template-columns:1.3fr 1fr">{mitre_html}{critical_list_html}</div>
+
+<div style="margin-bottom:.75rem"><h2 style="font-size:.95rem;color:#f1f5f9">Blast Radius Overview</h2></div>
+{overview_html}
+
+<div class="panel" style="margin-bottom:1.1rem">
+  <h2>🎯 All Findings ({len(findings)})</h2>
+  <table>
+    <tr><th>Severity</th><th>Finding</th><th>Principal</th><th>MITRE</th><th>Details</th></tr>
+    {findings_rows or '<tr><td colspan="5" style="color:#64748b">No findings.</td></tr>'}
+  </table>
+</div>
+
+<div class="panel">
+  <h2>💥 Blast Radius</h2>
+  <table>
+    <tr><th>Principal</th><th>Blast Radius</th><th>Can Reach</th></tr>
+    {blast_rows or '<tr><td colspan="3" style="color:#64748b">No data.</td></tr>'}
+  </table>
+</div>
+
+<script>{graph_script}</script>
 </body>
 </html>"""
 
