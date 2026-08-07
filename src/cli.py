@@ -761,7 +761,8 @@ def build_html_export(result: "ScanResult") -> str:
         f'<span class="cat-count">{cnt}</span></div>'
         for cat, cnt in cat_counts.most_common()
     )
-    category_html = f'<div class="panel"><h2>Findings by Category</h2>{cat_rows or "<p style=\'color:#64748b;font-size:.8rem\'>No findings.</p>"}</div>'
+    _no_findings_html = "<p style='color:#64748b;font-size:.8rem'>No findings.</p>"
+    category_html = f'<div class="panel"><h2>Findings by Category</h2>{cat_rows or _no_findings_html}</div>'
 
     # -- top 5 risky principals -----------------------------------------------
     worst_severity: dict[str, Severity] = {}
@@ -780,7 +781,7 @@ def build_html_export(result: "ScanResult") -> str:
         f'<span class="badge" style="background:{SEVERITY_HEX.get(sev.name, "#64748b")}">{sev.name}</span></div>'
         for pid, sev in ranked
     )
-    top_risky_html = f'<div class="panel"><h2>Top 5 Risky Principals</h2>{risky_rows or "<p style=\'color:#64748b;font-size:.8rem\'>No findings.</p>"}</div>'
+    top_risky_html = f'<div class="panel"><h2>Top 5 Risky Principals</h2>{risky_rows or _no_findings_html}</div>'
 
     # -- MITRE ATT&CK mapping table -----------------------------------------------
     mitre_counts: Counter = Counter()
@@ -827,9 +828,10 @@ def build_html_export(result: "ScanResult") -> str:
         f'<span class="crit-text">{_html_escape(f.title)}<div class="crit-principal">{_html_escape(f.principal_id)}</div></span></li>'
         for f in top_findings
     )
+    _no_crit_html = "<p style='color:#64748b;font-size:.8rem'>No critical or high findings.</p>"
     critical_list_html = (
         '<div class="panel"><h2>Recent Critical Findings</h2>'
-        f'<ul class="crit-list">{crit_items or "<p style=\'color:#64748b;font-size:.8rem\'>No critical or high findings.</p>"}</ul>'
+        f'<ul class="crit-list">{crit_items or _no_crit_html}</ul>'
         '</div>'
     )
 
