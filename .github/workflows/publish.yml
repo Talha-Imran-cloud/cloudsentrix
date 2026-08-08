@@ -1,0 +1,61 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v*.*.*"   # Trigger only on version tags like v1.0.0, v1.2.3
+
+jobs:
+  test:
+    name: Run Tests Before Publishing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run tests
+        run: pytest tests/ -v
+
+  publish:
+    name: Build & Publish to PyPI
+    needs: test          # Only runs if tests pass
+    runs-on: ubuntu-latest
+    environment: pypi    # Requires "pypi" environment in GitHub repo settings
+    permissions:
+      id-token: write    # Required for trusted publishing (no API key needed)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: Build package
+        run: python -m build
+        # This creates:
+        # dist/cloudsentrix-1.0.0.tar.gz       (source)
+        # dist/cloudsentrix-1.0.0-py3-none-any.whl  (wheel)
+
+      - name: Check package quality
+        run: twine check dist/*
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # Uses PyPI Trusted Publishing — NO API KEY NEEDED
+        # Just set up the environment in PyPI dashboard
