@@ -5,6 +5,7 @@
 CloudSentrix is a free, open-source command-line tool that scans Google Cloud Platform IAM policy exports for privilege-escalation risks, generates interactive attack-path graphs, scores your security posture, and produces client-ready PDF reports — all without any paid APIs.
 
 [![CI](https://github.com/Talha-Imran-cloud/cloudsentrix/actions/workflows/ci.yml/badge.svg)](https://github.com/Talha-Imran-cloud/cloudsentrix/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/cloudsentrix)](https://pypi.org/project/cloudsentrix/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-144%20passed-brightgreen)](tests/)
@@ -33,7 +34,17 @@ CloudSentrix is a free, open-source command-line tool that scans Google Cloud Pl
 
 ## Installation
 
-### Windows
+### ⚡ Recommended — Install via pip (easiest)
+
+```bash
+pip install cloudsentrix
+```
+
+That's it. No cloning, no virtual env setup needed.
+
+### Alternative — Install from source
+
+#### Windows
 
 ```powershell
 git clone https://github.com/Talha-Imran-cloud/cloudsentrix.git
@@ -43,7 +54,7 @@ venv\Scripts\activate
 pip install -e .
 ```
 
-### Linux / macOS (Kali, Ubuntu, Debian)
+#### Linux / macOS (Kali, Ubuntu, Debian)
 
 ```bash
 git clone https://github.com/Talha-Imran-cloud/cloudsentrix.git
@@ -309,6 +320,7 @@ cloudsentrix/
 │   ├── sample_gcp_iam.json         # Basic test file
 │   └── demo_enterprise_iam.json    # Realistic enterprise demo
 ├── .github/workflows/ci.yml        # GitHub Actions CI
+├── .github/workflows/publish.yml   # PyPI auto-publish
 ├── pyproject.toml                  # Packaging configuration
 └── README.md
 ```
@@ -362,3 +374,4 @@ MIT License — free to use, modify, and distribute.
 
 [![GitHub](https://img.shields.io/badge/GitHub-Talha--Imran--cloud-black)](https://github.com/Talha-Imran-cloud)
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-blue)](https://linkedin.com/in/talha-imran)
+[![PyPI](https://img.shields.io/pypi/v/cloudsentrix?label=PyPI)](https://pypi.org/project/cloudsentrix/)
