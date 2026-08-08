@@ -759,11 +759,22 @@ def build_html_export(result: "ScanResult") -> str:
         is_high = any(f.principal_id == pid and f.severity.name == "HIGH" for f in findings)
         color = "#dc2626" if is_critical else "#ea580c" if is_high else "#3b82f6"
         nodes.append({"id": pid, "label": pid.split("@")[0], "title": pid, "color": color, "shape": "ellipse"})
-    for rid in graph.role_ids():
-        nodes.append({"id": rid, "label": rid.replace("roles/", ""), "title": rid, "color": "#475569", "shape": "box"})
-    for pid in graph.principal_ids():
-        for role in graph.roles_of(pid):
-            edges.append({"from": pid, "to": role, "color": "#475569", "dashes": False, "label": ""})
+    # GCP graph has role_ids()/roles_of() — AWS graph has permission_ids()/permissions_of()
+    _is_aws = hasattr(graph, "permission_ids")
+    if _is_aws:
+        for perm in graph.permission_ids():
+            short = perm.replace("managed-policy:arn:aws:iam::aws:policy/", "policy/")
+            short = short.replace("managed-policy:", "")[:40]
+            nodes.append({"id": perm, "label": short, "title": perm, "color": "#475569", "shape": "box"})
+        for pid in graph.principal_ids():
+            for perm in graph.permissions_of(pid):
+                edges.append({"from": pid, "to": perm, "color": "#475569", "dashes": False, "label": ""})
+    else:
+        for rid in graph.role_ids():
+            nodes.append({"id": rid, "label": rid.replace("roles/", ""), "title": rid, "color": "#475569", "shape": "box"})
+        for pid in graph.principal_ids():
+            for role in graph.roles_of(pid):
+                edges.append({"from": pid, "to": role, "color": "#475569", "dashes": False, "label": ""})
     for src, tgt, rule_id in result.escalation_edges:
         edges.append({"from": src, "to": tgt, "color": "#dc2626", "dashes": True, "label": rule_id})
     graph_data = _json.dumps({"nodes": nodes, "edges": edges})
@@ -1222,14 +1233,24 @@ def render_rules_list(writer: OutputWriter) -> None:
     writer.print("")
 
 
-def render_principals_list(writer: OutputWriter, graph: IAMGraph) -> None:
+def render_principals_list(writer: OutputWriter, graph) -> None:
     writer.print("[bold]── Principals ────────────────────────────────────────[/bold]")
+    _is_aws = hasattr(graph, "permission_ids")
     for principal_id in sorted(graph.principal_ids()):
         p = graph.get_principal(principal_id)
-        member_type = p.member_type.value if p is not None else "unknown"
-        writer.print(f"[bold]{principal_id}[/bold] ({member_type})")
-        for role in sorted(graph.roles_of(principal_id)):
-            writer.print(f"    - {role}")
+        if _is_aws:
+            # AWS principal — show type (user/group/role)
+            ptype = p.principal_type.value if p is not None else "unknown"
+            writer.print(f"[bold]{principal_id}[/bold] ({ptype})")
+            for perm in sorted(graph.permissions_of(principal_id))[:5]:
+                short = perm.replace("managed-policy:arn:aws:iam::aws:policy/", "policy/")
+                writer.print(f"    - {short}")
+        else:
+            # GCP principal — show member type and roles
+            member_type = p.member_type.value if p is not None else "unknown"
+            writer.print(f"[bold]{principal_id}[/bold] ({member_type})")
+            for role in sorted(graph.roles_of(principal_id)):
+                writer.print(f"    - {role}")
     writer.print("")
 
 
@@ -1374,7 +1395,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     blast_parser.add_argument("--file", "-f", required=True, help="Path to a GCP IAM policy JSON export.")
     blast_parser.add_argument("--principal", "-p", required=True, help="Principal id (e.g. an email) to check.")
-    blast_parser.add_argument("--cloud", default="gcp", choices=["gcp"], help="Cloud provider.")
+    blast_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws"], help="Cloud provider.")
     blast_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     blast_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
@@ -1393,7 +1414,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     validate_parser = subparsers.add_parser(
         "validate", help="Check that a file is a well-formed GCP IAM policy export, before scanning it."
     )
-    validate_parser.add_argument("--file", "-f", required=True, help="Path to a GCP IAM policy JSON export.")
+    validate_parser.add_argument("--file", "-f", required=True, help="Path to a GCP or AWS IAM policy JSON export.")
+    validate_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws"], help="Cloud provider.")
     validate_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     validate_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
@@ -1401,7 +1423,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "score", help="Print only the overall security score — useful for CI badges/checks."
     )
     score_parser.add_argument("--file", "-f", required=True, help="Path to a GCP IAM policy JSON export.")
-    score_parser.add_argument("--cloud", default="gcp", choices=["gcp"], help="Cloud provider.")
+    score_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws"], help="Cloud provider.")
     score_parser.add_argument(
         "--min-score", type=int, default=None, metavar="N",
         help="Exit 1 if the score falls below N (overrides the default CRITICAL-based exit code).",
@@ -1415,7 +1437,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     compare_parser.add_argument("--old", required=True, help="Path to the earlier/baseline IAM policy JSON export.")
     compare_parser.add_argument("--new", required=True, help="Path to the newer IAM policy JSON export.")
-    compare_parser.add_argument("--cloud", default="gcp", choices=["gcp"], help="Cloud provider.")
+    compare_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws"], help="Cloud provider.")
     compare_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     compare_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
@@ -1425,7 +1447,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     path_parser.add_argument("--file", "-f", required=True, help="Path to a GCP IAM policy JSON export.")
     path_parser.add_argument("--source", "-s", required=True, help="Starting principal id (e.g. an email).")
     path_parser.add_argument("--target", "-t", required=True, help="Target principal id to try to reach.")
-    path_parser.add_argument("--cloud", default="gcp", choices=["gcp"], help="Cloud provider.")
+    path_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws"], help="Cloud provider.")
     path_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     path_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
@@ -1433,7 +1455,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "mitre-map", help="Map every finding onto the MITRE ATT&CK Cloud Matrix."
     )
     mitre_parser.add_argument("--file", "-f", required=True, help="Path to a GCP IAM policy JSON export.")
-    mitre_parser.add_argument("--cloud", default="gcp", choices=["gcp"], help="Cloud provider.")
+    mitre_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws"], help="Cloud provider.")
     mitre_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     mitre_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
@@ -1449,7 +1471,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--severity", default="all", choices=sorted(SEVERITY_CHOICES),
         help="Minimum severity to generate fixes for (default: all).",
     )
-    remediate_parser.add_argument("--cloud", default="gcp", choices=["gcp"], help="Cloud provider.")
+    remediate_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws"], help="Cloud provider.")
     remediate_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     remediate_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
@@ -1485,7 +1507,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--top", type=int, default=5,
         help="Number of blast-radius rows to display on each re-scan (default: 5).",
     )
-    watch_parser.add_argument("--cloud", default="gcp", choices=["gcp"], help="Cloud provider.")
+    watch_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws"], help="Cloud provider.")
     watch_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     watch_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
@@ -1502,7 +1524,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--no-ai", action="store_true",
         help="Skip the Gemini AI summary and use the built-in template summary instead.",
     )
-    report_parser.add_argument("--cloud", default="gcp", choices=["gcp"], help="Cloud provider.")
+    report_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws"], help="Cloud provider.")
     report_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     report_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
@@ -1587,10 +1609,23 @@ def _handle_list_principals(writer: OutputWriter, args: argparse.Namespace) -> i
 
 
 def _handle_validate(writer: OutputWriter, args: argparse.Namespace) -> int:
+    cloud = getattr(args, "cloud", "gcp")
+    writer.print("[bold]── Validation ────────────────────────────────────────[/bold]")
+    if cloud == "aws":
+        try:
+            from aws_parser import AWSIAMParser, AWSParserError
+            policy = AWSIAMParser().parse_file(args.file)
+            stats = policy.summary()
+            writer.print(f"[bold green]VALID[/bold green] — {args.file} is a valid AWS IAM authorization-details export.")
+            writer.print(f"  Principals : {stats['total_principals']} ({stats['users']} users, {stats['groups']} groups, {stats['roles']} roles)")
+            writer.print(f"  Permissions: {stats['total_permissions']} total")
+        except Exception as exc:
+            writer.print(f"[bold red]INVALID[/bold red] — {exc}")
+            return 2
+        return 0
     try:
         policy, warnings = run_validate(args.file)
     except IAMParserError as exc:
-        writer.print("[bold]── Validation ────────────────────────────────────────[/bold]")
         writer.print(f"[bold red]INVALID[/bold red] — {exc}")
         return 2
     render_validate(writer, args.file, policy, warnings)
