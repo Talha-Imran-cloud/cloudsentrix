@@ -58,6 +58,12 @@ from live_scanner import fetch_live_iam_policy, save_policy_to_file, LiveScanErr
 from pdf_report import generate_pdf_report
 from ai_summary import generate_ai_summary, build_fallback_summary, AISummaryError
 
+# AWS support
+from aws_parser import AWSIAMParser, AWSParserError
+from aws_graph import AWSIAMGraph
+from aws_detection import AWSDetectionEngine, AWSFinding, summarize_aws_findings
+from aws_live_scanner import AWSLiveScanner, AWSLiveScanError
+
 logger = logging.getLogger(__name__)
 
 __version__ = "1.0.0"
@@ -138,11 +144,13 @@ def run_scan(file_path: str, cloud: str = "gcp") -> ScanResult:
 
     Raises:
         ValueError: If `cloud` isn't a supported provider.
-        IAMParserError (and subclasses): If the file can't be parsed.
+        IAMParserError / AWSParserError: If the file can't be parsed.
         GraphBuildError: If the graph can't be built from the parsed policy.
     """
+    if cloud == "aws":
+        return _run_scan_aws(file_path)
     if cloud != "gcp":
-        raise ValueError(f"Unsupported cloud provider: {cloud!r}. Only 'gcp' is supported today.")
+        raise ValueError(f"Unsupported cloud provider: {cloud!r}. Supported: 'gcp', 'aws'.")
 
     policy = GCPIAMParser().parse_file(file_path)
     graph = IAMGraph.from_policy(policy)
@@ -164,11 +172,65 @@ def run_scan(file_path: str, cloud: str = "gcp") -> ScanResult:
     )
 
 
+def _run_scan_aws(file_path: str) -> ScanResult:
+    """AWS scan pipeline: parse -> graph -> detect -> score.
+    Blast radius and escalation edges are not yet supported for AWS
+    (GCP blast_radius.py is GCP-graph-specific); stubs are returned so
+    the rest of the CLI (render_findings, render_risk_score, export) works
+    identically for both clouds.
+    """
+    from detection import Severity as GCPSeverity  # reuse for RiskScorer
+
+    aws_policy = AWSIAMParser().parse_file(file_path)
+    aws_graph = AWSIAMGraph.from_policy(aws_policy)
+    aws_findings = AWSDetectionEngine().run(aws_graph)
+
+    # Convert AWSFindings -> GCP Finding shape so RiskScorer + renderers work unchanged
+    gcp_findings = _aws_findings_to_gcp(aws_findings)
+    risk = RiskScorer().score(gcp_findings)
+
+    # Return a ScanResult with stubs for GCP-only fields
+    return ScanResult(
+        source_file=file_path,
+        cloud="aws",
+        policy=aws_policy,      # type: ignore[arg-type]  — renderers use .summary() only
+        graph=aws_graph,        # type: ignore[arg-type]  — renderers use findings directly
+        findings=gcp_findings,
+        risk=risk,
+        blast_radius=[],
+        escalation_edges=[],
+    )
+
+
+def _aws_findings_to_gcp(aws_findings: list[AWSFinding]) -> list[Finding]:
+    """Convert AWSFinding objects to GCP Finding shape.
+    Both dataclasses share the same fields — this is a straight mapping.
+    Severity IntEnum values are identical so we cast by value.
+    """
+    from detection import Finding as GCPFinding, Severity as GCPSeverity
+    result = []
+    for f in aws_findings:
+        result.append(GCPFinding(
+            rule_id=f.rule_id,
+            title=f.title,
+            severity=GCPSeverity(int(f.severity)),
+            principal_id=f.principal_id,
+            description=f.description,
+            mitre_technique_id=f.mitre_technique_id,
+            mitre_technique_name=f.mitre_technique_name,
+            evidence=f.evidence,
+        ))
+    return result
+
+
 def run_list_principals(file_path: str, cloud: str = "gcp") -> IAMGraph:
     """Parses a file and builds its graph only — no detection, for a
     lightweight inventory view."""
+    if cloud == "aws":
+        aws_policy = AWSIAMParser().parse_file(file_path)
+        return AWSIAMGraph.from_policy(aws_policy)  # type: ignore[return-value]
     if cloud != "gcp":
-        raise ValueError(f"Unsupported cloud provider: {cloud!r}. Only 'gcp' is supported today.")
+        raise ValueError(f"Unsupported cloud provider: {cloud!r}. Supported: 'gcp', 'aws'.")
     policy = GCPIAMParser().parse_file(file_path)
     return IAMGraph.from_policy(policy)
 
@@ -579,11 +641,20 @@ def build_json_export(result: "ScanResult") -> dict:
 
 
 RULE_CATEGORY: dict[str, str] = {
+    # GCP rules
     "GCP-001": "Public Access",
     "GCP-002": "Service Account Risks",
     "GCP-003": "Service Account Risks",
     "GCP-004": "Overly Permissive Roles",
     "GCP-005": "Privilege Escalation",
+    # AWS rules
+    "AWS-001": "Overly Permissive Roles",
+    "AWS-002": "Privilege Escalation",
+    "AWS-003": "Privilege Escalation",
+    "AWS-004": "Public Access",
+    "AWS-005": "Credential Risks",
+    "AWS-006": "Backdoor Creation",
+    "AWS-007": "Overly Permissive Roles",
 }
 
 CATEGORY_COLOR: dict[str, str] = {
@@ -1281,11 +1352,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    scan_parser = subparsers.add_parser("scan", help="Scan a GCP IAM policy export for privilege-escalation risk.")
-    scan_parser.add_argument("--file", "-f", required=True, help="Path to a GCP IAM policy JSON export.")
+    scan_parser = subparsers.add_parser("scan", help="Scan a GCP or AWS IAM policy export for privilege-escalation risk.")
+    scan_parser.add_argument("--file", "-f", required=True, help="Path to a GCP or AWS IAM policy JSON export.")
     scan_parser.add_argument(
-        "--cloud", default="gcp", choices=["gcp"],
-        help="Cloud provider (only 'gcp' is supported today).",
+        "--cloud", default="gcp", choices=["gcp", "aws"],
+        help="Cloud provider: 'gcp' (default) or 'aws'.",
     )
     scan_parser.add_argument(
         "--severity", default="all", choices=sorted(SEVERITY_CHOICES),
@@ -1315,7 +1386,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "list-principals", help="Quick inventory: every principal and the roles it holds."
     )
     list_parser.add_argument("--file", "-f", required=True, help="Path to a GCP IAM policy JSON export.")
-    list_parser.add_argument("--cloud", default="gcp", choices=["gcp"], help="Cloud provider.")
+    list_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws"], help="Cloud provider.")
     list_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     list_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
@@ -1391,7 +1462,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--format", choices=["json", "csv", "html", "sarif"], default=None,
         help="Output format (default: inferred from --output's extension).",
     )
-    export_parser.add_argument("--cloud", default="gcp", choices=["gcp"], help="Cloud provider.")
+    export_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws"], help="Cloud provider.")
     export_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     export_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
@@ -1437,11 +1508,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     live_scan_parser = subparsers.add_parser(
         "live-scan",
-        help="Fetch live IAM policy from GCP and scan it directly (requires gcloud CLI).",
+        help="Fetch live IAM policy from GCP or AWS and scan it directly.",
     )
     live_scan_parser.add_argument(
-        "--project", "-p", required=True,
-        help="GCP Project ID to fetch and scan (e.g. my-project-123).",
+        "--project", "-p", default=None,
+        help="GCP Project ID to fetch and scan (e.g. my-project-123). Required for --cloud gcp.",
     )
     live_scan_parser.add_argument(
         "--save", default=None, metavar="PATH",
@@ -1455,7 +1526,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--top", type=int, default=5,
         help="Number of blast-radius rows to display (default: 5).",
     )
-    live_scan_parser.add_argument("--cloud", default="gcp", choices=["gcp"], help="Cloud provider.")
+    live_scan_parser.add_argument(
+        "--cloud", default="gcp", choices=["gcp", "aws"],
+        help="Cloud provider to scan (default: gcp).",
+    )
+    # AWS-specific options
+    live_scan_parser.add_argument(
+        "--profile", default=None,
+        help="[AWS] AWS CLI profile name (from ~/.aws/credentials). Default: use env vars.",
+    )
+    live_scan_parser.add_argument(
+        "--region", default="us-east-1",
+        help="[AWS] AWS region (default: us-east-1).",
+    )
+    live_scan_parser.add_argument(
+        "--endpoint", default=None,
+        help="[AWS] Override endpoint URL — use http://localhost:4566 for LocalStack testing.",
+    )
     live_scan_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     live_scan_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
@@ -1657,6 +1744,54 @@ def _handle_report(writer: OutputWriter, args: argparse.Namespace) -> int:
 
 
 def _handle_live_scan(writer: OutputWriter, args: argparse.Namespace) -> int:
+    cloud = getattr(args, "cloud", "gcp")
+
+    # ── AWS live scan ────────────────────────────────────────────────────────
+    if cloud == "aws":
+        profile  = getattr(args, "profile", None)
+        region   = getattr(args, "region", "us-east-1")
+        endpoint = getattr(args, "endpoint", None)
+
+        writer.print(
+            f"[bold cyan]Fetching live AWS IAM data[/bold cyan] "
+            f"(profile={profile or 'default'}, region={region}"
+            + (f", endpoint={endpoint}" if endpoint else "") + ")"
+        )
+        try:
+            scanner = AWSLiveScanner()
+            aws_policy = scanner.scan(
+                profile=profile,
+                region=region,
+                endpoint_url=endpoint,
+                save_to=getattr(args, "save", None),
+            )
+        except AWSLiveScanError as exc:
+            writer.print(f"[bold red]AWS Error:[/bold red] {exc}")
+            return 2
+
+        stats = aws_policy.summary()
+        writer.print(
+            f"[bold green]Fetched:[/bold green] "
+            f"{stats['users']} user(s), {stats['groups']} group(s), "
+            f"{stats['roles']} role(s)"
+        )
+        if getattr(args, "save", None):
+            writer.print(f"[bold green]Saved to:[/bold green] {Path(args.save).resolve()}")
+
+        # Run detection on the fetched policy
+        from aws_graph import AWSIAMGraph as _AWSGraph
+        aws_graph = _AWSGraph.from_policy(aws_policy)
+        aws_findings = AWSDetectionEngine().run(aws_graph)
+        gcp_findings = _aws_findings_to_gcp(aws_findings)
+        risk = RiskScorer().score(gcp_findings)
+
+        min_severity = SEVERITY_CHOICES[args.severity]
+        displayed = filter_by_severity(gcp_findings, min_severity)
+        render_findings(writer, displayed)
+        render_risk_score(writer, risk)
+        return determine_exit_code(gcp_findings)
+
+    # ── GCP live scan (original, unchanged) ──────────────────────────────────
     writer.print(f"[bold cyan]Fetching live IAM policy for project:[/bold cyan] [bold]{args.project}[/bold]")
     try:
         policy_data = fetch_live_iam_policy(args.project)

@@ -1,0 +1,407 @@
+{
+  "UserDetailList": [
+    {
+      "UserName": "admin-alice",
+      "Arn": "arn:aws:iam::123456789012:user/admin-alice",
+      "UserId": "AIDACKCEVSQ6C2EXAMPLE1",
+      "Path": "/",
+      "GroupList": ["admins"],
+      "AttachedManagedPolicies": [
+        {
+          "PolicyName": "AdministratorAccess",
+          "PolicyArn": "arn:aws:iam::aws:policy/AdministratorAccess"
+        }
+      ],
+      "UserPolicyList": []
+    },
+    {
+      "UserName": "developer-bob",
+      "Arn": "arn:aws:iam::123456789012:user/developer-bob",
+      "UserId": "AIDACKCEVSQ6C2EXAMPLE2",
+      "Path": "/",
+      "GroupList": ["developers"],
+      "AttachedManagedPolicies": [
+        {
+          "PolicyName": "PowerUserAccess",
+          "PolicyArn": "arn:aws:iam::aws:policy/PowerUserAccess"
+        }
+      ],
+      "UserPolicyList": [
+        {
+          "PolicyName": "PassRoleToEC2",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": [
+                  "iam:PassRole",
+                  "ec2:RunInstances",
+                  "ec2:DescribeInstances"
+                ],
+                "Resource": "*"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "UserName": "intern-charlie",
+      "Arn": "arn:aws:iam::123456789012:user/intern-charlie",
+      "UserId": "AIDACKCEVSQ6C2EXAMPLE3",
+      "Path": "/",
+      "GroupList": ["interns"],
+      "AttachedManagedPolicies": [],
+      "UserPolicyList": [
+        {
+          "PolicyName": "InternReadOnly",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": [
+                  "s3:GetObject",
+                  "s3:ListBucket",
+                  "cloudwatch:GetMetricStatistics"
+                ],
+                "Resource": "*"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "UserName": "devops-diana",
+      "Arn": "arn:aws:iam::123456789012:user/devops-diana",
+      "UserId": "AIDACKCEVSQ6C2EXAMPLE4",
+      "Path": "/",
+      "GroupList": ["devops"],
+      "AttachedManagedPolicies": [
+        {
+          "PolicyName": "IAMFullAccess",
+          "PolicyArn": "arn:aws:iam::aws:policy/IAMFullAccess"
+        }
+      ],
+      "UserPolicyList": [
+        {
+          "PolicyName": "CreateAccessKeys",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": [
+                  "iam:CreateAccessKey",
+                  "iam:DeleteAccessKey",
+                  "iam:ListAccessKeys",
+                  "iam:UpdateAccessKey"
+                ],
+                "Resource": "*"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "UserName": "readonly-eve",
+      "Arn": "arn:aws:iam::123456789012:user/readonly-eve",
+      "UserId": "AIDACKCEVSQ6C2EXAMPLE5",
+      "Path": "/",
+      "GroupList": [],
+      "AttachedManagedPolicies": [
+        {
+          "PolicyName": "ReadOnlyAccess",
+          "PolicyArn": "arn:aws:iam::aws:policy/ReadOnlyAccess"
+        }
+      ],
+      "UserPolicyList": []
+    }
+  ],
+
+  "GroupDetailList": [
+    {
+      "GroupName": "admins",
+      "Arn": "arn:aws:iam::123456789012:group/admins",
+      "GroupId": "AGPACKCEVSQ6C2EXAMPLE1",
+      "Path": "/",
+      "AttachedManagedPolicies": [
+        {
+          "PolicyName": "AdministratorAccess",
+          "PolicyArn": "arn:aws:iam::aws:policy/AdministratorAccess"
+        }
+      ],
+      "GroupPolicyList": []
+    },
+    {
+      "GroupName": "developers",
+      "Arn": "arn:aws:iam::123456789012:group/developers",
+      "GroupId": "AGPACKCEVSQ6C2EXAMPLE2",
+      "Path": "/",
+      "AttachedManagedPolicies": [],
+      "GroupPolicyList": [
+        {
+          "PolicyName": "DeveloperPolicy",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": [
+                  "ec2:*",
+                  "s3:*",
+                  "lambda:*",
+                  "cloudformation:*"
+                ],
+                "Resource": "*"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "GroupName": "devops",
+      "Arn": "arn:aws:iam::123456789012:group/devops",
+      "GroupId": "AGPACKCEVSQ6C2EXAMPLE3",
+      "Path": "/",
+      "AttachedManagedPolicies": [],
+      "GroupPolicyList": [
+        {
+          "PolicyName": "DevOpsPolicy",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": [
+                  "iam:PassRole",
+                  "iam:CreateRole",
+                  "iam:AttachRolePolicy",
+                  "iam:PutRolePolicy",
+                  "sts:AssumeRole",
+                  "ec2:*",
+                  "eks:*"
+                ],
+                "Resource": "*"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "GroupName": "interns",
+      "Arn": "arn:aws:iam::123456789012:group/interns",
+      "GroupId": "AGPACKCEVSQ6C2EXAMPLE4",
+      "Path": "/",
+      "AttachedManagedPolicies": [],
+      "GroupPolicyList": [
+        {
+          "PolicyName": "InternPolicy",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": [
+                  "s3:GetObject",
+                  "s3:ListBucket"
+                ],
+                "Resource": "*"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+
+  "RoleDetailList": [
+    {
+      "RoleName": "ec2-admin-role",
+      "Arn": "arn:aws:iam::123456789012:role/ec2-admin-role",
+      "RoleId": "AROACKCEVSQ6C2EXAMPLE1",
+      "Path": "/",
+      "AttachedManagedPolicies": [
+        {
+          "PolicyName": "AdministratorAccess",
+          "PolicyArn": "arn:aws:iam::aws:policy/AdministratorAccess"
+        }
+      ],
+      "RolePolicyList": [],
+      "AssumeRolePolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "ec2.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      }
+    },
+    {
+      "RoleName": "lambda-execution-role",
+      "Arn": "arn:aws:iam::123456789012:role/lambda-execution-role",
+      "RoleId": "AROACKCEVSQ6C2EXAMPLE2",
+      "Path": "/",
+      "AttachedManagedPolicies": [
+        {
+          "PolicyName": "AWSLambdaBasicExecutionRole",
+          "PolicyArn": "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        }
+      ],
+      "RolePolicyList": [
+        {
+          "PolicyName": "LambdaS3Access",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": [
+                  "s3:GetObject",
+                  "s3:PutObject"
+                ],
+                "Resource": "arn:aws:s3:::my-app-bucket/*"
+              }
+            ]
+          }
+        }
+      ],
+      "AssumeRolePolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "lambda.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      }
+    },
+    {
+      "RoleName": "cross-account-role",
+      "Arn": "arn:aws:iam::123456789012:role/cross-account-role",
+      "RoleId": "AROACKCEVSQ6C2EXAMPLE3",
+      "Path": "/",
+      "AttachedManagedPolicies": [
+        {
+          "PolicyName": "AdministratorAccess",
+          "PolicyArn": "arn:aws:iam::aws:policy/AdministratorAccess"
+        }
+      ],
+      "RolePolicyList": [],
+      "AssumeRolePolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": "*",
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      }
+    },
+    {
+      "RoleName": "ci-cd-deploy-role",
+      "Arn": "arn:aws:iam::123456789012:role/ci-cd-deploy-role",
+      "RoleId": "AROACKCEVSQ6C2EXAMPLE4",
+      "Path": "/",
+      "AttachedManagedPolicies": [],
+      "RolePolicyList": [
+        {
+          "PolicyName": "CICDDeployPolicy",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": [
+                  "iam:PassRole",
+                  "iam:CreateRole",
+                  "iam:AttachRolePolicy",
+                  "iam:PutRolePolicy",
+                  "iam:CreateUser",
+                  "iam:AttachUserPolicy",
+                  "iam:CreateAccessKey",
+                  "cloudformation:*",
+                  "lambda:*",
+                  "s3:*"
+                ],
+                "Resource": "*"
+              }
+            ]
+          }
+        }
+      ],
+      "AssumeRolePolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::123456789012:user/devops-diana"
+            },
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      }
+    }
+  ],
+
+  "Policies": [
+    {
+      "PolicyName": "AdministratorAccess",
+      "PolicyArn": "arn:aws:iam::aws:policy/AdministratorAccess",
+      "PolicyId": "ANPACKCEVSQ6C2EXAMPLE1",
+      "IsAttachable": true,
+      "Description": "Provides full access to AWS services and resources.",
+      "PolicyVersionList": [
+        {
+          "Document": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": "*",
+                "Resource": "*"
+              }
+            ]
+          },
+          "IsDefaultVersion": true
+        }
+      ]
+    },
+    {
+      "PolicyName": "IAMFullAccess",
+      "PolicyArn": "arn:aws:iam::aws:policy/IAMFullAccess",
+      "PolicyId": "ANPACKCEVSQ6C2EXAMPLE2",
+      "IsAttachable": true,
+      "Description": "Provides full access to IAM via the AWS Management Console.",
+      "PolicyVersionList": [
+        {
+          "Document": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": "iam:*",
+                "Resource": "*"
+              }
+            ]
+          },
+          "IsDefaultVersion": true
+        }
+      ]
+    }
+  ]
+}

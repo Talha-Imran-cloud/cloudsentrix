@@ -1,8 +1,8 @@
 # CloudSentrix 🔐
 
-**GCP IAM Privilege-Escalation Attack-Path Analyzer**
+**Multi-Cloud IAM Privilege-Escalation Attack-Path Analyzer**
 
-CloudSentrix is a free, open-source command-line tool that scans Google Cloud Platform IAM policy exports for privilege-escalation risks, generates interactive attack-path graphs, scores your security posture, and produces client-ready PDF reports — all without any paid APIs.
+CloudSentrix is a free, open-source command-line tool that scans **GCP and AWS** IAM policy exports for privilege-escalation risks, generates interactive attack-path graphs, scores your security posture, and produces client-ready PDF reports — all without any paid APIs.
 
 [![CI](https://github.com/Talha-Imran-cloud/cloudsentrix/actions/workflows/ci.yml/badge.svg)](https://github.com/Talha-Imran-cloud/cloudsentrix/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/cloudsentrix)](https://pypi.org/project/cloudsentrix/)
@@ -14,12 +14,20 @@ CloudSentrix is a free, open-source command-line tool that scans Google Cloud Pl
 
 ## What It Does
 
+### GCP Support
 - **Detects** 5 GCP IAM privilege-escalation patterns (mapped to MITRE ATT&CK Cloud Matrix)
-- **Scores** your project's security posture from 0–100
 - **Calculates blast radius** — if one account is compromised, how much can an attacker reach?
 - **Generates remediation** — exact `gcloud` CLI commands to fix each finding
-- **Exports** results as JSON, CSV, SARIF, Interactive HTML Dashboard, or client-ready PDF
 - **Live scanning** — fetch and scan a live GCP project directly (no file needed)
+
+### AWS Support ⚡ NEW
+- **Detects** 7 AWS IAM privilege-escalation patterns including `iam:PassRole`, `sts:AssumeRole`, backdoor user creation
+- **Live scanning** — fetch and scan a live AWS account directly via boto3
+- **LocalStack support** — test without a real AWS account (free, runs locally)
+
+### Both Clouds
+- **Scores** your security posture from 0–100
+- **Exports** results as JSON, CSV, SARIF, Interactive HTML Dashboard, or client-ready PDF
 - **Watches** a folder and auto-rescans whenever an IAM file changes
 - **AI summaries** — plain-language executive summaries via Google Gemini
 
@@ -29,6 +37,7 @@ CloudSentrix is a free, open-source command-line tool that scans Google Cloud Pl
 
 - Python 3.10 or higher
 - pip
+- For AWS live scan: `pip install boto3`
 
 ---
 
@@ -72,48 +81,76 @@ cloudsentrix --version
 
 ---
 
-## Getting Your GCP IAM Policy File
+## Getting Your IAM Policy File
 
+### GCP
 ```bash
 gcloud projects get-iam-policy YOUR_PROJECT_ID --format=json > my_project_iam.json
 ```
 
-Two sample files are included for testing:
-- `sample_data/sample_gcp_iam.json` — basic 5-principal example
-- `sample_data/demo_enterprise_iam.json` — realistic enterprise scenario
+### AWS ⚡ NEW
+```bash
+aws iam get-account-authorization-details --output json > aws_iam.json
+```
+
+Sample files included for testing:
+- `sample_data/sample_gcp_iam.json` — GCP basic example
+- `sample_data/demo_enterprise_iam.json` — GCP enterprise scenario
+- `sample_data/sample_aws_iam.json` — AWS example with 7 escalation risks ⚡ NEW
 
 ---
 
 ## Commands
 
 ### `scan` — Full pipeline scan
+
 ```bash
+# GCP (default)
 cloudsentrix scan --file sample_data/sample_gcp_iam.json
 cloudsentrix scan --file my_project.json --severity high
 cloudsentrix scan --file my_project.json --top 10
+
+# AWS ⚡ NEW
+cloudsentrix scan --file aws_iam.json --cloud aws
+cloudsentrix scan --file aws_iam.json --cloud aws --severity critical
 ```
 
-### `live-scan` — Scan a live GCP project directly ⚡ NEW
+### `live-scan` — Scan a live cloud account directly
+
+#### GCP
 ```bash
 # Requires: gcloud CLI authenticated
 gcloud auth application-default login
 
-# Fetch and scan live IAM policy
 cloudsentrix live-scan --project my-gcp-project-id
-
-# Scan and save the fetched policy
 cloudsentrix live-scan --project my-gcp-project-id --save fetched_policy.json
-
-# Filter by severity
 cloudsentrix live-scan --project my-gcp-project-id --severity critical
 ```
 
-### `blast-radius` — Blast radius for one principal
+#### AWS ⚡ NEW
+```bash
+# Requires: AWS credentials configured (aws configure)
+pip install boto3
+
+# Scan default AWS profile
+cloudsentrix live-scan --cloud aws
+
+# Scan specific profile and region
+cloudsentrix live-scan --cloud aws --profile my-profile --region us-west-2
+
+# Save fetched policy for offline analysis
+cloudsentrix live-scan --cloud aws --save aws_policy.json
+
+# Test without a real AWS account (LocalStack)
+cloudsentrix live-scan --cloud aws --endpoint http://localhost:4566
+```
+
+### `blast-radius` — Blast radius for one principal (GCP)
 ```bash
 cloudsentrix blast-radius --file my_project.json --principal admin@company.com
 ```
 
-### `principal-path` — Escalation path between two principals
+### `principal-path` — Escalation path between two principals (GCP)
 ```bash
 cloudsentrix principal-path --file my_project.json \
   --source intern@company.com \
@@ -125,7 +162,7 @@ cloudsentrix principal-path --file my_project.json \
 cloudsentrix mitre-map --file my_project.json
 ```
 
-### `remediate` — Generate exact gcloud fix commands
+### `remediate` — Generate exact fix commands (GCP)
 ```bash
 cloudsentrix remediate --file my_project.json
 cloudsentrix remediate --file my_project.json --project my-real-project-id
@@ -150,18 +187,17 @@ cloudsentrix compare --old january.json --new february.json
 ```
 
 ### `export` — Export results to JSON, CSV, HTML, or SARIF
+
 ```bash
-# JSON export
+# GCP
 cloudsentrix export --file my_project.json --output report.json
-
-# CSV export
-cloudsentrix export --file my_project.json --output report.csv
-
-# Interactive HTML Dashboard (open in browser)
 cloudsentrix export --file my_project.json --output dashboard.html
-
-# SARIF export (GitHub Code Scanning compatible) ⚡ NEW
 cloudsentrix export --file my_project.json --output results.sarif
+
+# AWS ⚡ NEW
+cloudsentrix export --file aws_iam.json --cloud aws --output aws_report.json
+cloudsentrix export --file aws_iam.json --cloud aws --output aws_dashboard.html
+cloudsentrix export --file aws_iam.json --cloud aws --output aws_results.sarif
 ```
 
 **Opening the HTML Dashboard:**
@@ -176,31 +212,19 @@ Linux / macOS:
 xdg-open dashboard.html
 ```
 
-The HTML dashboard includes:
-- Security score card
-- Finding counts by severity
-- **Interactive attack graph** (drag nodes, scroll to zoom, hover for details)
-- Full findings table with MITRE mapping
-- Blast radius table
-
 ### `report` — Generate a client-ready PDF report
 ```bash
 # Without AI summary
 cloudsentrix report --file my_project.json --output my_report.pdf --no-ai
 
-# With Gemini AI summary (set API key first — see below)
+# With Gemini AI summary
 cloudsentrix report --file my_project.json --output my_report.pdf
 ```
 
 ### `watch` — Auto-rescan when file changes
 ```bash
-# Watch a single file
 cloudsentrix watch --path my_project.json
-
-# Watch a folder (rescans any .json file that changes)
 cloudsentrix watch --path /path/to/iam/exports/
-
-# Custom poll interval (seconds)
 cloudsentrix watch --path my_project.json --interval 5
 ```
 
@@ -212,19 +236,43 @@ cloudsentrix rules
 ```
 
 ### `list-principals` — List all principals and their roles
+
 ```bash
+# GCP
 cloudsentrix list-principals --file my_project.json
+
+# AWS ⚡ NEW
+cloudsentrix list-principals --file aws_iam.json --cloud aws
 ```
 
 ---
 
-## SARIF Export — GitHub Code Scanning ⚡ NEW
+## AWS Live Scan — Testing Without a Real Account (LocalStack)
 
-SARIF (Static Analysis Results Interchange Format) output is compatible with:
-- **GitHub Code Scanning** — upload directly to your repo's Security tab
-- **VS Code SARIF Viewer** extension
-- **Azure DevOps** security dashboards
-- Any SARIF 2.1.0-compatible tool
+LocalStack simulates AWS locally — free, no account needed.
+
+```bash
+# Step 1 — Install LocalStack
+pip install localstack awscli-local
+
+# Step 2 — Start LocalStack (keep this terminal open)
+localstack start
+
+# Step 3 — Create test IAM resources
+awslocal iam create-user --user-name test-admin
+awslocal iam attach-user-policy \
+  --user-name test-admin \
+  --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
+
+# Step 4 — Scan with CloudSentrix
+cloudsentrix live-scan --cloud aws --endpoint http://localhost:4566
+```
+
+---
+
+## SARIF Export — GitHub Code Scanning
+
+SARIF output is compatible with GitHub Code Scanning, VS Code SARIF Viewer, and Azure DevOps.
 
 ```bash
 cloudsentrix export --file my_project.json --output results.sarif
@@ -241,8 +289,6 @@ gh api repos/OWNER/REPO/code-scanning/sarifs \
 ---
 
 ## Gemini AI Summary (Optional)
-
-The `report` command can generate a plain-language AI summary using Google Gemini.
 
 **Step 1 — Get a free API key** from [Google AI Studio](https://aistudio.google.com/app/apikey)
 
@@ -263,8 +309,6 @@ export GEMINI_API_KEY="your_api_key_here"
 cloudsentrix report --file my_project.json --output report.pdf
 ```
 
-If no API key is set, a built-in template summary is used automatically.
-
 ---
 
 ## Exit Codes
@@ -279,6 +323,8 @@ If no API key is set, a built-in template summary is used automatically.
 
 ## Detection Rules
 
+### GCP Rules
+
 | Rule | Title | Severity | MITRE |
 |------|-------|----------|-------|
 | GCP-001 | Publicly Accessible Role Binding | CRITICAL | T1078.004 |
@@ -286,6 +332,18 @@ If no API key is set, a built-in template summary is used automatically.
 | GCP-003 | Service Account Key Admin | CRITICAL | T1098.001 |
 | GCP-004 | IAM Policy Administrator | CRITICAL | T1098.003 |
 | GCP-005 | Service Account Impersonation via Resource Attach | HIGH | T1548.005 |
+
+### AWS Rules ⚡ NEW
+
+| Rule | Title | Severity | MITRE |
+|------|-------|----------|-------|
+| AWS-001 | Administrator Access — Full AWS Control | CRITICAL | T1078.004 |
+| AWS-002 | IAM PassRole — Privilege Escalation via Service | CRITICAL | T1098.003 |
+| AWS-003 | IAM Policy Manipulation — Self-Escalation Path | CRITICAL | T1098.003 |
+| AWS-004 | Publicly Assumable Role — Trust Policy Allows Anyone | CRITICAL | T1078.004 |
+| AWS-005 | Access Key Creation — Long-Lived Credential Backdoor | CRITICAL | T1098.001 |
+| AWS-006 | Backdoor IAM User Creation | CRITICAL | T1136.003 |
+| AWS-007 | IAMFullAccess — Complete IAM Control | CRITICAL | T1098.003 |
 
 ---
 
@@ -305,20 +363,25 @@ Expected output: `144 passed`
 ```
 cloudsentrix/
 ├── src/
-│   ├── cli.py              # CLI entry point (15 commands)
-│   ├── parser.py           # GCP IAM JSON parser
-│   ├── graph.py            # IAM permission graph engine
-│   ├── detection.py        # Privilege-escalation detection rules
-│   ├── risk_score.py       # 0-100 security scoring engine
-│   ├── blast_radius.py     # Attack-path blast radius calculator
-│   ├── watch_handler.py    # File system watcher
-│   ├── live_scanner.py     # Live GCP project scanner
-│   ├── pdf_report.py       # PDF report generator
-│   └── ai_summary.py       # Gemini AI summary integration
-├── tests/                  # 144 pytest tests
+│   ├── cli.py                  # CLI entry point (15 commands)
+│   ├── parser.py               # GCP IAM JSON parser
+│   ├── graph.py                # GCP IAM permission graph engine
+│   ├── detection.py            # GCP privilege-escalation detection rules
+│   ├── risk_score.py           # 0-100 security scoring engine (GCP + AWS)
+│   ├── blast_radius.py         # GCP attack-path blast radius calculator
+│   ├── watch_handler.py        # File system watcher
+│   ├── live_scanner.py         # Live GCP project scanner
+│   ├── pdf_report.py           # PDF report generator
+│   ├── ai_summary.py           # Gemini AI summary integration
+│   ├── aws_parser.py           # AWS IAM JSON parser ⚡ NEW
+│   ├── aws_graph.py            # AWS IAM permission graph engine ⚡ NEW
+│   ├── aws_detection.py        # AWS privilege-escalation detection (7 rules) ⚡ NEW
+│   └── aws_live_scanner.py     # Live AWS scanner via boto3 ⚡ NEW
+├── tests/                      # 144 pytest tests
 ├── sample_data/
-│   ├── sample_gcp_iam.json         # Basic test file
-│   └── demo_enterprise_iam.json    # Realistic enterprise demo
+│   ├── sample_gcp_iam.json         # GCP basic test file
+│   ├── demo_enterprise_iam.json    # GCP enterprise demo
+│   └── sample_aws_iam.json         # AWS test file ⚡ NEW
 ├── .github/workflows/ci.yml        # GitHub Actions CI
 ├── .github/workflows/publish.yml   # PyPI auto-publish
 ├── pyproject.toml                  # Packaging configuration
@@ -329,36 +392,14 @@ cloudsentrix/
 
 ## Roadmap 🗺️
 
-### Coming Soon
-
 | Feature | Description | Status |
 |---------|-------------|--------|
-| **AWS Support** | Scan AWS IAM policies — detect privilege escalation via `iam:PassRole`, `sts:AssumeRole`, admin policies | 🔄 Planned |
+| **GCP Support** | Full GCP IAM scanning — 5 escalation rules, blast radius, remediation | ✅ Shipped |
+| **AWS Support** | AWS IAM scanning — 7 escalation rules, PassRole, AssumeRole, live scan | ✅ Shipped |
 | **Azure Support** | Scan Azure RBAC — detect Owner/Contributor abuse, service principal risks | 🔄 Planned |
 | **Multi-Cloud Dashboard** | Single HTML dashboard comparing GCP, AWS, Azure risk side by side | 🔄 Planned |
 | **Slack / Teams Alerts** | Send findings to Slack or Microsoft Teams webhook automatically | 🔄 Planned |
-| **PDF Multi-Project** | One PDF report covering multiple GCP projects at once | 🔄 Planned |
-
-### AWS Support (Preview)
-
-When AWS support ships, usage will look like:
-```bash
-# Export AWS IAM data
-aws iam get-account-authorization-details --output json > aws_iam.json
-
-# Scan AWS
-cloudsentrix scan --file aws_iam.json --cloud aws
-```
-
-### Azure Support (Preview)
-
-```bash
-# Export Azure RBAC
-az role assignment list --all --output json > azure_rbac.json
-
-# Scan Azure
-cloudsentrix scan --file azure_rbac.json --cloud azure
-```
+| **PDF Multi-Project** | One PDF report covering multiple projects at once | 🔄 Planned |
 
 ---
 
