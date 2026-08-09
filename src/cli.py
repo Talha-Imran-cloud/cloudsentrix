@@ -69,6 +69,9 @@ from azure_parser import parse_azure_file, AzureIAMData
 
 # Multi-cloud dashboard
 from multi_dashboard import generate_multi_dashboard
+
+# Notifications
+from notifier import send_notification
 from azure_detection import run_azure_detections, AzureFinding, get_azure_rules
 from azure_risk_score import score_azure, AzureScoreResult
 from azure_blast_radius import calculate_azure_blast_radius
@@ -1493,6 +1496,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--top", type=int, default=5,
         help="Number of blast-radius rows to display (default: 5).",
     )
+    scan_parser.add_argument(
+        "--notify", default=None, choices=["slack", "teams"],
+        help="Send findings to Slack or Teams after scan.",
+    )
+    scan_parser.add_argument(
+        "--webhook", default=None, metavar="URL",
+        help="Webhook URL (overrides env vars CLOUDSENTRIX_SLACK_WEBHOOK / CLOUDSENTRIX_TEAMS_WEBHOOK).",
+    )
     scan_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     scan_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
@@ -1707,6 +1718,20 @@ def _handle_scan(writer: OutputWriter, args: argparse.Namespace) -> int:
     render_findings(writer, displayed)
     render_risk_score(writer, result.risk)
     render_blast_radius(writer, result.blast_radius, args.top)
+
+    # Send notification if requested
+    notify = getattr(args, "notify", None)
+    if notify:
+        webhook = getattr(args, "webhook", None)
+        writer.print(f"[bold cyan]Sending {notify.title()} notification...[/bold cyan]")
+        ok = send_notification(notify, result.findings, result.risk,
+                               args.cloud, args.file, webhook)
+        if not ok:
+            writer.print(
+                f"[yellow]Tip:[/yellow] Set env var "
+                f"CLOUDSENTRIX_SLACK_WEBHOOK or CLOUDSENTRIX_TEAMS_WEBHOOK, "
+                f"or pass --webhook <url>"
+            )
 
     return determine_exit_code(result.findings)
 
