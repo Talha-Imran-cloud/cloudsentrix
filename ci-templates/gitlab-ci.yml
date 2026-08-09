@@ -1,0 +1,86 @@
+# CloudSentrix — GitLab CI/CD Template
+# =====================================
+# Add this to your .gitlab-ci.yml
+
+stages:
+  - security-scan
+  - report
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+cache:
+  paths:
+    - .cache/pip
+
+# ── GCP Scan ────────────────────────────────────────────────
+cloudsentrix-gcp:
+  stage: security-scan
+  image: python:3.11-slim
+  script:
+    - pip install cloudsentrix
+    - cloudsentrix scan --file sample_data/sample_gcp_iam.json --cloud gcp
+  artifacts:
+    when: always
+    paths:
+      - gcp-report.json
+    expire_in: 30 days
+  after_script:
+    - cloudsentrix export
+        --file sample_data/sample_gcp_iam.json
+        --cloud gcp
+        --output gcp-report.json || true
+  allow_failure: false   # Fail pipeline on CRITICAL findings
+
+# ── AWS Scan ────────────────────────────────────────────────
+cloudsentrix-aws:
+  stage: security-scan
+  image: python:3.11-slim
+  script:
+    - pip install cloudsentrix boto3
+    - cloudsentrix scan --file sample_data/sample_aws_iam.json --cloud aws
+  artifacts:
+    when: always
+    paths:
+      - aws-report.json
+    expire_in: 30 days
+  after_script:
+    - cloudsentrix export
+        --file sample_data/sample_aws_iam.json
+        --cloud aws
+        --output aws-report.json || true
+  allow_failure: false
+
+# ── Azure Scan ──────────────────────────────────────────────
+cloudsentrix-azure:
+  stage: security-scan
+  image: python:3.11-slim
+  script:
+    - pip install cloudsentrix
+    - cloudsentrix scan --file sample_data/sample_azure_rbac.json --cloud azure
+  allow_failure: false
+
+# ── Multi-Cloud Dashboard ───────────────────────────────────
+cloudsentrix-dashboard:
+  stage: report
+  image: python:3.11-slim
+  needs: ["cloudsentrix-gcp", "cloudsentrix-aws", "cloudsentrix-azure"]
+  script:
+    - pip install cloudsentrix
+    - cloudsentrix dashboard
+        --gcp   sample_data/sample_gcp_iam.json
+        --aws   sample_data/sample_aws_iam.json
+        --azure sample_data/sample_azure_rbac.json
+        --output multi-cloud-dashboard.html
+    - cloudsentrix report-multi
+        --gcp   sample_data/sample_gcp_iam.json
+        --aws   sample_data/sample_aws_iam.json
+        --azure sample_data/sample_azure_rbac.json
+        --output multi-cloud-report.pdf
+  artifacts:
+    when: always
+    paths:
+      - multi-cloud-dashboard.html
+      - multi-cloud-report.pdf
+    expire_in: 30 days
+  allow_failure: true

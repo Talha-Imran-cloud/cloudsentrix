@@ -1,0 +1,92 @@
+# CloudSentrix — GitHub Actions Multi-Cloud Template
+# ====================================================
+# Scans GCP + AWS + Azure in one pipeline.
+# Generates a combined HTML dashboard as artifact.
+
+name: CloudSentrix Multi-Cloud Security Scan
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+    branches: ["main", "master"]
+  schedule:
+    - cron: "0 6 * * 1"   # Every Monday at 6 AM UTC
+
+jobs:
+  multi-cloud-scan:
+    name: Multi-Cloud IAM Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install CloudSentrix
+        run: pip install cloudsentrix boto3
+
+      # ── GCP Scan ──────────────────────────────────────────
+      - name: Scan GCP IAM
+        run: |
+          cloudsentrix scan \
+            --file sample_data/sample_gcp_iam.json \
+            --cloud gcp
+        continue-on-error: true   # Don't stop pipeline — scan all clouds first
+
+      # ── AWS Scan ──────────────────────────────────────────
+      - name: Scan AWS IAM
+        run: |
+          cloudsentrix scan \
+            --file sample_data/sample_aws_iam.json \
+            --cloud aws
+        continue-on-error: true
+
+      # ── Azure Scan ────────────────────────────────────────
+      - name: Scan Azure RBAC
+        run: |
+          cloudsentrix scan \
+            --file sample_data/sample_azure_rbac.json \
+            --cloud azure
+        continue-on-error: true
+
+      # ── Multi-Cloud Dashboard ─────────────────────────────
+      - name: Generate Multi-Cloud Dashboard
+        run: |
+          cloudsentrix dashboard \
+            --gcp   sample_data/sample_gcp_iam.json \
+            --aws   sample_data/sample_aws_iam.json \
+            --azure sample_data/sample_azure_rbac.json \
+            --output multi-cloud-dashboard.html
+
+      # ── Multi-Cloud PDF Report ────────────────────────────
+      - name: Generate Multi-Cloud PDF Report
+        run: |
+          cloudsentrix report-multi \
+            --gcp   sample_data/sample_gcp_iam.json \
+            --aws   sample_data/sample_aws_iam.json \
+            --azure sample_data/sample_azure_rbac.json \
+            --output multi-cloud-report.pdf
+
+      # ── Upload Artifacts ──────────────────────────────────
+      - name: Upload Dashboard & Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudsentrix-security-reports
+          path: |
+            multi-cloud-dashboard.html
+            multi-cloud-report.pdf
+          retention-days: 30
+
+      # ── Fail if CRITICAL findings (strict mode) ───────────
+      - name: Check for CRITICAL findings (strict mode)
+        run: |
+          cloudsentrix score \
+            --file sample_data/sample_gcp_iam.json \
+            --min-score 50
+          # Exit code 1 if score < 50 → pipeline fails

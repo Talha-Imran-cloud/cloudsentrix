@@ -1,0 +1,88 @@
+# CloudSentrix — GitHub Actions CI/CD Template (GCP)
+# =====================================================
+# Automatically scans your GCP IAM policy on every push/PR.
+# Fails the pipeline if CRITICAL findings are detected.
+#
+# Setup:
+#   1. Add your GCP IAM JSON as a GitHub secret: GCP_IAM_POLICY
+#   2. Copy this file to .github/workflows/cloudsentrix-gcp.yml
+#   3. Push — done!
+
+name: CloudSentrix GCP Security Scan
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+    branches: ["main", "master"]
+  schedule:
+    - cron: "0 8 * * 1"   # Every Monday at 8 AM UTC
+
+jobs:
+  gcp-iam-scan:
+    name: GCP IAM Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install CloudSentrix
+        run: pip install cloudsentrix
+
+      # Option A — Scan from a file committed to your repo
+      - name: Scan GCP IAM Policy (file)
+        run: |
+          cloudsentrix scan \
+            --file sample_data/sample_gcp_iam.json \
+            --severity high \
+            --cloud gcp
+        # Exit code 1 = CRITICAL findings → pipeline fails automatically
+
+      # Option B — Export live from GCP (uncomment + set GCP_SERVICE_ACCOUNT secret)
+      # - name: Export live GCP IAM policy
+      #   env:
+      #     GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      #   run: |
+      #     echo "$GCP_SERVICE_ACCOUNT" > sa.json
+      #     gcloud auth activate-service-account --key-file=sa.json
+      #     gcloud projects get-iam-policy ${{ vars.GCP_PROJECT_ID }} \
+      #       --format=json > live_gcp_iam.json
+      #     cloudsentrix scan --file live_gcp_iam.json --cloud gcp
+
+      - name: Generate Security Report
+        if: always()   # Run even if scan found issues
+        run: |
+          cloudsentrix export \
+            --file sample_data/sample_gcp_iam.json \
+            --output gcp-security-report.json \
+            --cloud gcp
+
+      - name: Upload Report as Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gcp-security-report
+          path: gcp-security-report.json
+          retention-days: 30
+
+      # Optional — Upload SARIF to GitHub Security tab
+      - name: Generate SARIF Report
+        if: always()
+        run: |
+          cloudsentrix export \
+            --file sample_data/sample_gcp_iam.json \
+            --output results.sarif \
+            --cloud gcp
+
+      - name: Upload SARIF to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif
+        continue-on-error: true   # SARIF upload needs Advanced Security

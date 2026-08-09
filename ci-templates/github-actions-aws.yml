@@ -1,0 +1,87 @@
+# CloudSentrix — GitHub Actions CI/CD Template (AWS)
+# =====================================================
+# Automatically scans your AWS IAM on every push/PR.
+#
+# Setup:
+#   1. Add GitHub secrets: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+#   2. Copy to .github/workflows/cloudsentrix-aws.yml
+
+name: CloudSentrix AWS Security Scan
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+    branches: ["main", "master"]
+  schedule:
+    - cron: "0 8 * * 1"   # Every Monday at 8 AM UTC
+
+jobs:
+  aws-iam-scan:
+    name: AWS IAM Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install CloudSentrix + boto3
+        run: pip install cloudsentrix boto3
+
+      # Option A — Scan from a file committed to your repo
+      - name: Scan AWS IAM Policy (file)
+        run: |
+          cloudsentrix scan \
+            --file sample_data/sample_aws_iam.json \
+            --cloud aws \
+            --severity high
+
+      # Option B — Live scan from AWS (uncomment + set secrets)
+      # - name: Configure AWS credentials
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     aws-region: us-east-1
+      #
+      # - name: Export live AWS IAM
+      #   run: |
+      #     aws iam get-account-authorization-details \
+      #       --output json > live_aws_iam.json
+      #     cloudsentrix scan --file live_aws_iam.json --cloud aws
+
+      - name: Generate Security Score
+        if: always()
+        run: |
+          cloudsentrix score \
+            --file sample_data/sample_aws_iam.json \
+            --cloud aws \
+            --json
+
+      - name: Generate SARIF Report
+        if: always()
+        run: |
+          cloudsentrix export \
+            --file sample_data/sample_aws_iam.json \
+            --cloud aws \
+            --output aws-results.sarif
+
+      - name: Upload SARIF to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: aws-results.sarif
+        continue-on-error: true
+
+      - name: Upload Report Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aws-security-report
+          path: aws-results.sarif
+          retention-days: 30
