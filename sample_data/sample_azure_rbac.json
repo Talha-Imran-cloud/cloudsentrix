@@ -1,0 +1,113 @@
+{
+  "assignments": [
+    {
+      "principalId": "aaaa-1111-bbbb-2222",
+      "principalName": "alice@contoso.com",
+      "principalType": "User",
+      "roleDefinitionName": "Owner",
+      "roleDefinitionId": "/providers/Microsoft.Authorization/roleDefinitions/8e3af657-a8ff-443c-a75c-2fe8c4bcb635",
+      "scope": "/subscriptions/sub-0001-prod"
+    },
+    {
+      "principalId": "cccc-3333-dddd-4444",
+      "principalName": "bob_ext_partner.com#EXT#@contoso.onmicrosoft.com",
+      "principalType": "User",
+      "roleDefinitionName": "Contributor",
+      "roleDefinitionId": "/providers/Microsoft.Authorization/roleDefinitions/b24988ac-6180-42a0-ab88-20f7382dd24c",
+      "scope": "/subscriptions/sub-0001-prod"
+    },
+    {
+      "principalId": "eeee-5555-ffff-6666",
+      "principalName": "app-backend-sp",
+      "principalType": "ServicePrincipal",
+      "roleDefinitionName": "Owner",
+      "roleDefinitionId": "/providers/Microsoft.Authorization/roleDefinitions/8e3af657-a8ff-443c-a75c-2fe8c4bcb635",
+      "scope": "/subscriptions/sub-0001-prod"
+    },
+    {
+      "principalId": "gggg-7777-hhhh-8888",
+      "principalName": "charlie@contoso.com",
+      "principalType": "User",
+      "roleDefinitionName": "DevOps-Custom-Role",
+      "roleDefinitionId": "/subscriptions/sub-0001-prod/providers/Microsoft.Authorization/roleDefinitions/custom-dev-001",
+      "scope": "/subscriptions/sub-0001-prod/resourceGroups/rg-production"
+    },
+    {
+      "principalId": "iiii-9999-jjjj-0000",
+      "principalName": "dave@contoso.com",
+      "principalType": "User",
+      "roleDefinitionName": "Network Supervisor",
+      "roleDefinitionId": "/subscriptions/sub-0001-prod/providers/Microsoft.Authorization/roleDefinitions/custom-net-002",
+      "scope": "/subscriptions/sub-0001-prod"
+    },
+    {
+      "principalId": "kkkk-1234-llll-5678",
+      "principalName": "readonly-monitor-sp",
+      "principalType": "ServicePrincipal",
+      "roleDefinitionName": "Reader",
+      "roleDefinitionId": "/providers/Microsoft.Authorization/roleDefinitions/acdd72a7-3385-48ef-bd42-f606fba81ae7",
+      "scope": "/subscriptions/sub-0001-prod/resourceGroups/rg-monitoring"
+    },
+    {
+      "principalId": "mmmm-2345-nnnn-6789",
+      "principalName": "guest_vendor_acme.com#EXT#@contoso.onmicrosoft.com",
+      "principalType": "User",
+      "roleDefinitionName": "User Access Administrator",
+      "roleDefinitionId": "/providers/Microsoft.Authorization/roleDefinitions/18d7d88d-d35e-4fb5-a5c3-7773c20a72d9",
+      "scope": "/subscriptions/sub-0001-prod/resourceGroups/rg-shared"
+    }
+  ],
+  "definitions": [
+    {
+      "roleName": "DevOps-Custom-Role",
+      "id": "/subscriptions/sub-0001-prod/providers/Microsoft.Authorization/roleDefinitions/custom-dev-001",
+      "roleType": "CustomRole",
+      "permissions": [
+        {
+          "actions": [
+            "Microsoft.Compute/virtualMachines/*",
+            "Microsoft.Storage/storageAccounts/listKeys/action",
+            "Microsoft.Authorization/roleAssignments/write",
+            "Microsoft.Resources/deployments/*"
+          ],
+          "notActions": []
+        }
+      ],
+      "assignableScopes": ["/subscriptions/sub-0001-prod"]
+    },
+    {
+      "roleName": "Network Supervisor",
+      "id": "/subscriptions/sub-0001-prod/providers/Microsoft.Authorization/roleDefinitions/custom-net-002",
+      "roleType": "CustomRole",
+      "permissions": [
+        {
+          "actions": [
+            "Microsoft.Network/*",
+            "*/read",
+            "Microsoft.Compute/virtualMachines/runCommand/action"
+          ],
+          "notActions": []
+        }
+      ],
+      "assignableScopes": ["/subscriptions/sub-0001-prod"]
+    }
+  ],
+  "service_principals": [
+    {
+      "appId": "sp-app-backend-001",
+      "displayName": "app-backend-sp",
+      "id": "eeee-5555-ffff-6666",
+      "servicePrincipalType": "Application",
+      "accountEnabled": true,
+      "appRoles": []
+    },
+    {
+      "appId": "sp-readonly-monitor-002",
+      "displayName": "readonly-monitor-sp",
+      "id": "kkkk-1234-llll-5678",
+      "servicePrincipalType": "Application",
+      "accountEnabled": true,
+      "appRoles": []
+    }
+  ]
+}

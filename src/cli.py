@@ -66,6 +66,9 @@ from aws_live_scanner import AWSLiveScanner, AWSLiveScanError
 
 # Azure support
 from azure_parser import parse_azure_file, AzureIAMData
+
+# Multi-cloud dashboard
+from multi_dashboard import generate_multi_dashboard
 from azure_detection import run_azure_detections, AzureFinding, get_azure_rules
 from azure_risk_score import score_azure, AzureScoreResult
 from azure_blast_radius import calculate_azure_blast_radius
@@ -1502,6 +1505,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     blast_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     blast_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
+    # dashboard command
+    dash_parser = subparsers.add_parser(
+        "dashboard",
+        help="Generate a single multi-cloud HTML dashboard comparing GCP, AWS, and Azure.",
+    )
+    dash_parser.add_argument("--gcp",   default=None, metavar="FILE", help="GCP IAM JSON export file.")
+    dash_parser.add_argument("--aws",   default=None, metavar="FILE", help="AWS IAM JSON export file.")
+    dash_parser.add_argument("--azure", default=None, metavar="FILE", help="Azure RBAC JSON export file.")
+    dash_parser.add_argument("--output", "-o", default="multi_cloud_dashboard.html", metavar="FILE",
+                             help="Output HTML file (default: multi_cloud_dashboard.html).")
+    dash_parser.add_argument("--no-color",  action="store_true", help="Disable colored output.")
+    dash_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
+
     rules_parser = subparsers.add_parser("rules", help="List every detection rule this tool checks for.")
     rules_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     rules_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
@@ -1702,6 +1718,46 @@ def _handle_blast_radius(writer: OutputWriter, args: argparse.Namespace) -> int:
         writer.print(f"[bold red]Error:[/bold red] '{args.principal}' was not found in {args.file}.")
         return 2
     render_single_blast_radius(writer, match)
+    return 0
+
+
+def _handle_dashboard(writer: OutputWriter, args: argparse.Namespace) -> int:
+    """Generate multi-cloud HTML dashboard."""
+    gcp   = getattr(args, "gcp", None)
+    aws   = getattr(args, "aws", None)
+    azure = getattr(args, "azure", None)
+    out   = getattr(args, "output", "multi_cloud_dashboard.html")
+
+    if not any([gcp, aws, azure]):
+        writer.print("[bold red]Error:[/bold red] Provide at least one cloud file.")
+        writer.print("  --gcp my_gcp.json  --aws my_aws.json  --azure my_azure.json")
+        return 2
+
+    writer.print("[bold cyan]Generating Multi-Cloud Dashboard...[/bold cyan]")
+    if gcp:
+        writer.print(f"  GCP   → {gcp}")
+    if aws:
+        writer.print(f"  AWS   → {aws}")
+    if azure:
+        writer.print(f"  Azure → {azure}")
+
+    try:
+        scanned, total = generate_multi_dashboard(
+            gcp_file=gcp,
+            aws_file=aws,
+            azure_file=azure,
+            output_path=out,
+        )
+    except Exception as exc:
+        writer.print(f"[bold red]Error:[/bold red] {exc}")
+        return 2
+
+    writer.print(
+        f"[bold green]Dashboard generated![/bold green] "
+        f"{scanned} cloud(s) - {total} finding(s)"
+    )
+    writer.print(f"[bold green]📄 Output:[/bold green] {out}")
+    writer.print("[dim]Open the file in your browser to view the dashboard.[/dim]")
     return 0
 
 
@@ -2064,6 +2120,8 @@ def main(argv: list[str] | None = None) -> int:
             return _handle_scan(writer, args)
         if args.command == "blast-radius":
             return _handle_blast_radius(writer, args)
+        if args.command == "dashboard":
+            return _handle_dashboard(writer, args)
         if args.command == "rules":
             return _handle_rules(writer)
         if args.command == "list-principals":
