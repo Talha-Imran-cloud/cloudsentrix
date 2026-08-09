@@ -1,0 +1,171 @@
+{
+  "apps": [
+    {
+      "appId": "app-001-dangerous-oauth",
+      "displayName": "HR-Integration-App",
+      "id": "obj-001",
+      "signInAudience": "AzureADMyOrg",
+      "owners": ["owner-001"],
+      "createdDateTime": "2023-01-15T10:00:00Z",
+      "publisherDomain": "contoso.com",
+      "requiredResourceAccess": [
+        {
+          "resourceAppId": "00000003-0000-0000-c000-000000000000",
+          "resourceAccess": [
+            {"id": "Directory.ReadWrite.All", "type": "Role"},
+            {"id": "User.ReadWrite.All", "type": "Role"},
+            {"id": "Mail.ReadWrite", "type": "Role"}
+          ]
+        }
+      ],
+      "passwordCredentials": [
+        {
+          "keyId": "cred-001",
+          "displayName": "Main Secret",
+          "endDateTime": "2025-01-01T00:00:00Z",
+          "hint": "abc"
+        }
+      ],
+      "keyCredentials": []
+    },
+    {
+      "appId": "app-002-orphaned",
+      "displayName": "Legacy-Reporting-App",
+      "id": "obj-002",
+      "signInAudience": "AzureADMyOrg",
+      "owners": [],
+      "createdDateTime": "2021-06-01T00:00:00Z",
+      "publisherDomain": "contoso.com",
+      "requiredResourceAccess": [
+        {
+          "resourceAppId": "00000003-0000-0000-c000-000000000000",
+          "resourceAccess": [
+            {"id": "AuditLog.Read.All", "type": "Role"}
+          ]
+        }
+      ],
+      "passwordCredentials": [
+        {
+          "keyId": "cred-002",
+          "displayName": "Old Secret",
+          "endDateTime": "",
+          "hint": "xyz"
+        }
+      ],
+      "keyCredentials": []
+    },
+    {
+      "appId": "app-003-multitenant",
+      "displayName": "Partner-Portal-App",
+      "id": "obj-003",
+      "signInAudience": "AzureADMultipleOrgs",
+      "owners": ["owner-002"],
+      "createdDateTime": "2022-03-10T00:00:00Z",
+      "publisherDomain": "contoso.com",
+      "requiredResourceAccess": [
+        {
+          "resourceAppId": "00000003-0000-0000-c000-000000000000",
+          "resourceAccess": [
+            {"id": "Directory.ReadWrite.All", "type": "Role"},
+            {"id": "Application.ReadWrite.All", "type": "Role"}
+          ]
+        }
+      ],
+      "passwordCredentials": [
+        {
+          "keyId": "cred-003",
+          "displayName": "Partner Secret",
+          "endDateTime": "2027-12-31T00:00:00Z",
+          "hint": "prt"
+        }
+      ],
+      "keyCredentials": []
+    },
+    {
+      "appId": "app-004-safe",
+      "displayName": "Internal-Dashboard",
+      "id": "obj-004",
+      "signInAudience": "AzureADMyOrg",
+      "owners": ["owner-001", "owner-003"],
+      "createdDateTime": "2024-01-01T00:00:00Z",
+      "publisherDomain": "contoso.com",
+      "requiredResourceAccess": [
+        {
+          "resourceAppId": "00000003-0000-0000-c000-000000000000",
+          "resourceAccess": [
+            {"id": "User.Read", "type": "Scope"}
+          ]
+        }
+      ],
+      "passwordCredentials": [
+        {
+          "keyId": "cred-004",
+          "displayName": "Dashboard Secret",
+          "endDateTime": "2026-06-01T00:00:00Z",
+          "hint": "dsh"
+        }
+      ],
+      "keyCredentials": []
+    },
+    {
+      "appId": "app-005-expired-creds",
+      "displayName": "Old-API-Gateway",
+      "id": "obj-005",
+      "signInAudience": "AzureADMyOrg",
+      "owners": ["owner-004"],
+      "createdDateTime": "2020-01-01T00:00:00Z",
+      "publisherDomain": "contoso.com",
+      "requiredResourceAccess": [],
+      "passwordCredentials": [
+        {
+          "keyId": "cred-005a",
+          "displayName": "Expired Secret 1",
+          "endDateTime": "2022-01-01T00:00:00Z",
+          "hint": "old"
+        },
+        {
+          "keyId": "cred-005b",
+          "displayName": "Expired Secret 2",
+          "endDateTime": "2023-06-01T00:00:00Z",
+          "hint": "ex2"
+        }
+      ],
+      "keyCredentials": []
+    }
+  ],
+  "service_principals": [
+    {
+      "id": "sp-001",
+      "appId": "app-001-dangerous-oauth",
+      "displayName": "HR-Integration-App",
+      "servicePrincipalType": "Application",
+      "accountEnabled": true,
+      "owners": ["owner-001"],
+      "appRoleAssignments": [
+        {"value": "Directory.ReadWrite.All"},
+        {"value": "User.ReadWrite.All"}
+      ]
+    },
+    {
+      "id": "sp-002",
+      "appId": "app-003-multitenant",
+      "displayName": "Partner-Portal-App",
+      "servicePrincipalType": "Application",
+      "accountEnabled": true,
+      "owners": [],
+      "appRoleAssignments": [
+        {"value": "RoleManagement.ReadWrite.Directory"},
+        {"value": "AppRoleAssignment.ReadWrite.All"}
+      ]
+    },
+    {
+      "id": "sp-003",
+      "appId": "app-004-safe",
+      "displayName": "Internal-Dashboard",
+      "servicePrincipalType": "Application",
+      "accountEnabled": true,
+      "owners": ["owner-001"],
+      "appRoleAssignments": []
+    }
+  ]
+}
