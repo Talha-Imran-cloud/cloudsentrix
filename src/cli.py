@@ -72,6 +72,9 @@ from multi_dashboard import generate_multi_dashboard
 
 # Notifications
 from notifier import send_notification
+
+# Multi-cloud PDF
+from multi_pdf_report import generate_multi_pdf
 from azure_detection import run_azure_detections, AzureFinding, get_azure_rules
 from azure_risk_score import score_azure, AzureScoreResult
 from azure_blast_radius import calculate_azure_blast_radius
@@ -1516,6 +1519,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     blast_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     blast_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
+    # report-multi command
+    rmp = subparsers.add_parser(
+        "report-multi",
+        help="Generate a single PDF report covering GCP, AWS, and Azure in one document.",
+    )
+    rmp.add_argument("--gcp",   default=None, metavar="FILE", help="GCP IAM JSON export.")
+    rmp.add_argument("--aws",   default=None, metavar="FILE", help="AWS IAM JSON export.")
+    rmp.add_argument("--azure", default=None, metavar="FILE", help="Azure RBAC JSON export.")
+    rmp.add_argument("--output", "-o", default="multi_cloud_report.pdf",
+                     help="Output PDF file (default: multi_cloud_report.pdf).")
+    rmp.add_argument("--no-ai", action="store_true", default=True,
+                     help="Skip Gemini AI summary (default: True).")
+    rmp.add_argument("--no-color",  action="store_true", help="Disable colored output.")
+    rmp.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
+
     # dashboard command
     dash_parser = subparsers.add_parser(
         "dashboard",
@@ -1743,6 +1761,41 @@ def _handle_blast_radius(writer: OutputWriter, args: argparse.Namespace) -> int:
         writer.print(f"[bold red]Error:[/bold red] '{args.principal}' was not found in {args.file}.")
         return 2
     render_single_blast_radius(writer, match)
+    return 0
+
+
+def _handle_report_multi(writer: OutputWriter, args: argparse.Namespace) -> int:
+    """Generate a multi-cloud PDF report."""
+    gcp   = getattr(args, "gcp", None)
+    aws   = getattr(args, "aws", None)
+    azure = getattr(args, "azure", None)
+    out   = getattr(args, "output", "multi_cloud_report.pdf")
+    no_ai = getattr(args, "no_ai", True)
+
+    if not any([gcp, aws, azure]):
+        writer.print("[bold red]Error:[/bold red] Provide at least one cloud file.")
+        writer.print("  --gcp my_gcp.json  --aws my_aws.json  --azure my_azure.json")
+        return 2
+
+    writer.print("[bold cyan]Generating Multi-Cloud PDF Report...[/bold cyan]")
+    if gcp:   writer.print(f"  GCP   -> {gcp}")
+    if aws:   writer.print(f"  AWS   -> {aws}")
+    if azure: writer.print(f"  Azure -> {azure}")
+
+    try:
+        scanned, total = generate_multi_pdf(
+            gcp_file=gcp, aws_file=aws, azure_file=azure,
+            output_path=out, no_ai=no_ai,
+        )
+    except ImportError as exc:
+        writer.print(f"[bold red]Error:[/bold red] {exc}")
+        return 2
+    except Exception as exc:
+        writer.print(f"[bold red]Error:[/bold red] {exc}")
+        return 2
+
+    writer.print(f"[bold green]PDF generated![/bold green] {scanned} cloud(s) - {total} finding(s)")
+    writer.print(f"[bold green]Output:[/bold green] {out}")
     return 0
 
 
@@ -2145,6 +2198,8 @@ def main(argv: list[str] | None = None) -> int:
             return _handle_scan(writer, args)
         if args.command == "blast-radius":
             return _handle_blast_radius(writer, args)
+        if args.command == "report-multi":
+            return _handle_report_multi(writer, args)
         if args.command == "dashboard":
             return _handle_dashboard(writer, args)
         if args.command == "rules":
