@@ -64,6 +64,14 @@ from aws_graph import AWSIAMGraph
 from aws_detection import AWSDetectionEngine, AWSFinding, summarize_aws_findings
 from aws_live_scanner import AWSLiveScanner, AWSLiveScanError
 
+# Azure support
+from azure_parser import parse_azure_file, AzureIAMData
+from azure_detection import run_azure_detections, AzureFinding, get_azure_rules
+from azure_risk_score import score_azure, AzureScoreResult
+from azure_blast_radius import calculate_azure_blast_radius
+from azure_exporter import export_azure
+from azure_live_scanner import fetch_azure_live
+
 logger = logging.getLogger(__name__)
 
 __version__ = "1.0.0"
@@ -137,6 +145,11 @@ class ScanResult:
     risk: RiskScore
     blast_radius: list[BlastRadiusResult]
     escalation_edges: list[tuple[str, str, str]]
+    # Azure-specific fields (None for GCP/AWS scans)
+    _az_findings: list = None  # type: ignore
+    _az_score: object = None
+    _az_blast: list = None     # type: ignore
+    _az_iam: object = None
 
 
 def run_scan(file_path: str, cloud: str = "gcp") -> ScanResult:
@@ -149,8 +162,10 @@ def run_scan(file_path: str, cloud: str = "gcp") -> ScanResult:
     """
     if cloud == "aws":
         return _run_scan_aws(file_path)
+    if cloud == "azure":
+        return _run_scan_azure(file_path)
     if cloud != "gcp":
-        raise ValueError(f"Unsupported cloud provider: {cloud!r}. Supported: 'gcp', 'aws'.")
+        raise ValueError(f"Unsupported cloud provider: {cloud!r}. Supported: 'gcp', 'aws', 'azure'.")
 
     policy = GCPIAMParser().parse_file(file_path)
     graph = IAMGraph.from_policy(policy)
@@ -202,6 +217,55 @@ def _run_scan_aws(file_path: str) -> ScanResult:
     )
 
 
+def _run_scan_azure(file_path: str) -> ScanResult:
+    """Azure scan pipeline: parse -> detect -> score -> blast radius."""
+    from detection import Finding as GCPFinding, Severity as GCPSeverity
+
+    iam = parse_azure_file(file_path)
+    az_findings = run_azure_detections(iam)
+    az_score = score_azure(az_findings, iam)
+    az_blast = calculate_azure_blast_radius(iam)
+
+    # Convert AzureFindings -> GCP Finding shape for RiskScorer + renderers
+    gcp_findings = _azure_findings_to_gcp(az_findings)
+    risk = RiskScorer().score(gcp_findings)
+
+    return ScanResult(
+        source_file=file_path,
+        cloud="azure",
+        policy=iam,           # type: ignore[arg-type]
+        graph=iam,            # type: ignore[arg-type]  renderers check cloud
+        findings=gcp_findings,
+        risk=risk,
+        blast_radius=[],
+        escalation_edges=[],
+        _az_findings=az_findings,
+        _az_score=az_score,
+        _az_blast=az_blast,
+        _az_iam=iam,
+    )
+
+
+def _azure_findings_to_gcp(az_findings: list[AzureFinding]) -> list[Finding]:
+    """Convert AzureFinding -> GCP Finding shape for shared renderers."""
+    from detection import Finding as GCPFinding, Severity as GCPSeverity
+    sev_map = {"CRITICAL": GCPSeverity.CRITICAL, "HIGH": GCPSeverity.HIGH,
+               "MEDIUM": GCPSeverity.MEDIUM, "LOW": GCPSeverity.LOW}
+    result = []
+    for f in az_findings:
+        result.append(GCPFinding(
+            rule_id=f.rule_id,
+            title=f.title,
+            severity=sev_map.get(f.severity, GCPSeverity.LOW),
+            principal_id=f.principal_name,
+            description=f.description,
+            mitre_technique_id=f.mitre_technique,
+            mitre_technique_name=f.mitre_tactic,
+            evidence=(f.role,),
+        ))
+    return result
+
+
 def _aws_findings_to_gcp(aws_findings: list[AWSFinding]) -> list[Finding]:
     """Convert AWSFinding objects to GCP Finding shape.
     Both dataclasses share the same fields — this is a straight mapping.
@@ -229,8 +293,10 @@ def run_list_principals(file_path: str, cloud: str = "gcp") -> IAMGraph:
     if cloud == "aws":
         aws_policy = AWSIAMParser().parse_file(file_path)
         return AWSIAMGraph.from_policy(aws_policy)  # type: ignore[return-value]
+    if cloud == "azure":
+        return parse_azure_file(file_path)  # type: ignore[return-value]
     if cloud != "gcp":
-        raise ValueError(f"Unsupported cloud provider: {cloud!r}. Supported: 'gcp', 'aws'.")
+        raise ValueError(f"Unsupported cloud provider: {cloud!r}. Supported: 'gcp', 'aws', 'azure'.")
     policy = GCPIAMParser().parse_file(file_path)
     return IAMGraph.from_policy(policy)
 
@@ -655,6 +721,12 @@ RULE_CATEGORY: dict[str, str] = {
     "AWS-005": "Credential Risks",
     "AWS-006": "Backdoor Creation",
     "AWS-007": "Overly Permissive Roles",
+    # Azure rules
+    "AZ-001": "Overly Permissive Roles",
+    "AZ-002": "Service Principal Risks",
+    "AZ-003": "Guest Access Risks",
+    "AZ-004": "Privilege Escalation",
+    "AZ-005": "Custom Role Risks",
 }
 
 CATEGORY_COLOR: dict[str, str] = {
@@ -1225,28 +1297,59 @@ def render_single_blast_radius(writer: OutputWriter, result: BlastRadiusResult) 
 
 
 def render_rules_list(writer: OutputWriter) -> None:
-    writer.print("[bold]── Detection Rules ───────────────────────────────────[/bold]")
+    writer.print("[bold]── GCP Detection Rules ───────────────────────────────[/bold]")
     for rule in DetectionEngine().rules:
         color = SEVERITY_COLOR.get(rule.severity, "white")
         writer.print(f"[{color}]{rule.rule_id}[/{color}] {rule.title}  ({rule.severity})")
         writer.print(f"  MITRE: {rule.mitre_technique_id} - {rule.mitre_technique_name}")
     writer.print("")
 
+    writer.print("[bold]── AWS Detection Rules ───────────────────────────────[/bold]")
+    from aws_detection import AWSDetectionEngine
+    for rule in AWSDetectionEngine()._default_rules():
+        color = SEVERITY_COLOR.get(rule.severity, "white")
+        writer.print(f"[{color}]{rule.rule_id}[/{color}] {rule.title}  ({rule.severity})")
+        writer.print(f"  MITRE: {rule.mitre_technique_id} - {rule.mitre_technique_name}")
+    writer.print("")
+
+    writer.print("[bold]── Azure Detection Rules ─────────────────────────────[/bold]")
+    sev_color = {"CRITICAL": "red", "HIGH": "yellow", "MEDIUM": "blue", "LOW": "green"}
+    for rule in get_azure_rules():
+        color = sev_color.get(rule["severity"], "white")
+        writer.print(f"[{color}]{rule['id']}[/{color}] {rule['title']}  ({rule['severity']})")
+        writer.print(f"  MITRE: {rule['mitre']}")
+    writer.print("")
+
 
 def render_principals_list(writer: OutputWriter, graph) -> None:
     writer.print("[bold]── Principals ────────────────────────────────────────[/bold]")
     _is_aws = hasattr(graph, "permission_ids")
+    _is_azure = hasattr(graph, "assignments")  # AzureIAMData
+
+    if _is_azure:
+        # Azure — group assignments by principal
+        from collections import defaultdict
+        groups: dict = defaultdict(list)
+        for assign in graph.assignments:
+            groups[assign.principal_name].append(assign)
+        for name in sorted(groups):
+            assigns = groups[name]
+            ptype = assigns[0].principal_type
+            writer.print(f"[bold]{name}[/bold] ({ptype})")
+            for a in assigns[:3]:
+                writer.print(f"    - {a.role_definition_name} @ {a.scope_level}")
+        writer.print("")
+        return
+
     for principal_id in sorted(graph.principal_ids()):
         p = graph.get_principal(principal_id)
         if _is_aws:
-            # AWS principal — show type (user/group/role)
             ptype = p.principal_type.value if p is not None else "unknown"
             writer.print(f"[bold]{principal_id}[/bold] ({ptype})")
             for perm in sorted(graph.permissions_of(principal_id))[:5]:
                 short = perm.replace("managed-policy:arn:aws:iam::aws:policy/", "policy/")
                 writer.print(f"    - {short}")
         else:
-            # GCP principal — show member type and roles
             member_type = p.member_type.value if p is not None else "unknown"
             writer.print(f"[bold]{principal_id}[/bold] ({member_type})")
             for role in sorted(graph.roles_of(principal_id)):
@@ -1376,7 +1479,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     scan_parser = subparsers.add_parser("scan", help="Scan a GCP or AWS IAM policy export for privilege-escalation risk.")
     scan_parser.add_argument("--file", "-f", required=True, help="Path to a GCP or AWS IAM policy JSON export.")
     scan_parser.add_argument(
-        "--cloud", default="gcp", choices=["gcp", "aws"],
+        "--cloud", default="gcp", choices=["gcp", "aws", "azure"],
         help="Cloud provider: 'gcp' (default) or 'aws'.",
     )
     scan_parser.add_argument(
@@ -1395,7 +1498,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     blast_parser.add_argument("--file", "-f", required=True, help="Path to a GCP IAM policy JSON export.")
     blast_parser.add_argument("--principal", "-p", required=True, help="Principal id (e.g. an email) to check.")
-    blast_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws"], help="Cloud provider.")
+    blast_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws", "azure"], help="Cloud provider.")
     blast_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     blast_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
@@ -1407,7 +1510,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "list-principals", help="Quick inventory: every principal and the roles it holds."
     )
     list_parser.add_argument("--file", "-f", required=True, help="Path to a GCP IAM policy JSON export.")
-    list_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws"], help="Cloud provider.")
+    list_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws", "azure"], help="Cloud provider.")
     list_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     list_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
@@ -1415,7 +1518,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "validate", help="Check that a file is a well-formed GCP IAM policy export, before scanning it."
     )
     validate_parser.add_argument("--file", "-f", required=True, help="Path to a GCP or AWS IAM policy JSON export.")
-    validate_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws"], help="Cloud provider.")
+    validate_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws", "azure"], help="Cloud provider.")
     validate_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     validate_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
@@ -1423,7 +1526,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "score", help="Print only the overall security score — useful for CI badges/checks."
     )
     score_parser.add_argument("--file", "-f", required=True, help="Path to a GCP IAM policy JSON export.")
-    score_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws"], help="Cloud provider.")
+    score_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws", "azure"], help="Cloud provider.")
     score_parser.add_argument(
         "--min-score", type=int, default=None, metavar="N",
         help="Exit 1 if the score falls below N (overrides the default CRITICAL-based exit code).",
@@ -1437,7 +1540,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     compare_parser.add_argument("--old", required=True, help="Path to the earlier/baseline IAM policy JSON export.")
     compare_parser.add_argument("--new", required=True, help="Path to the newer IAM policy JSON export.")
-    compare_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws"], help="Cloud provider.")
+    compare_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws", "azure"], help="Cloud provider.")
     compare_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     compare_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
@@ -1447,7 +1550,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     path_parser.add_argument("--file", "-f", required=True, help="Path to a GCP IAM policy JSON export.")
     path_parser.add_argument("--source", "-s", required=True, help="Starting principal id (e.g. an email).")
     path_parser.add_argument("--target", "-t", required=True, help="Target principal id to try to reach.")
-    path_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws"], help="Cloud provider.")
+    path_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws", "azure"], help="Cloud provider.")
     path_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     path_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
@@ -1455,7 +1558,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "mitre-map", help="Map every finding onto the MITRE ATT&CK Cloud Matrix."
     )
     mitre_parser.add_argument("--file", "-f", required=True, help="Path to a GCP IAM policy JSON export.")
-    mitre_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws"], help="Cloud provider.")
+    mitre_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws", "azure"], help="Cloud provider.")
     mitre_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     mitre_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
@@ -1471,7 +1574,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--severity", default="all", choices=sorted(SEVERITY_CHOICES),
         help="Minimum severity to generate fixes for (default: all).",
     )
-    remediate_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws"], help="Cloud provider.")
+    remediate_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws", "azure"], help="Cloud provider.")
     remediate_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     remediate_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
@@ -1484,7 +1587,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--format", choices=["json", "csv", "html", "sarif"], default=None,
         help="Output format (default: inferred from --output's extension).",
     )
-    export_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws"], help="Cloud provider.")
+    export_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws", "azure"], help="Cloud provider.")
     export_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     export_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
@@ -1507,7 +1610,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--top", type=int, default=5,
         help="Number of blast-radius rows to display on each re-scan (default: 5).",
     )
-    watch_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws"], help="Cloud provider.")
+    watch_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws", "azure"], help="Cloud provider.")
     watch_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     watch_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
@@ -1524,7 +1627,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--no-ai", action="store_true",
         help="Skip the Gemini AI summary and use the built-in template summary instead.",
     )
-    report_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws"], help="Cloud provider.")
+    report_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws", "azure"], help="Cloud provider.")
     report_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     report_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
@@ -1549,7 +1652,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Number of blast-radius rows to display (default: 5).",
     )
     live_scan_parser.add_argument(
-        "--cloud", default="gcp", choices=["gcp", "aws"],
+        "--cloud", default="gcp", choices=["gcp", "aws", "azure"],
         help="Cloud provider to scan (default: gcp).",
     )
     # AWS-specific options
@@ -1564,6 +1667,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     live_scan_parser.add_argument(
         "--endpoint", default=None,
         help="[AWS] Override endpoint URL — use http://localhost:4566 for LocalStack testing.",
+    )
+    # Azure-specific options
+    live_scan_parser.add_argument(
+        "--subscription", default=None,
+        help="[Azure] Azure subscription ID or name. Default: uses currently active subscription.",
     )
     live_scan_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     live_scan_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
@@ -1619,6 +1727,19 @@ def _handle_validate(writer: OutputWriter, args: argparse.Namespace) -> int:
             writer.print(f"[bold green]VALID[/bold green] — {args.file} is a valid AWS IAM authorization-details export.")
             writer.print(f"  Principals : {stats['total_principals']} ({stats['users']} users, {stats['groups']} groups, {stats['roles']} roles)")
             writer.print(f"  Permissions: {stats['total_permissions']} total")
+        except Exception as exc:
+            writer.print(f"[bold red]INVALID[/bold red] — {exc}")
+            return 2
+        return 0
+    if cloud == "azure":
+        try:
+            iam = parse_azure_file(args.file)
+            unique = {a.principal_name for a in iam.assignments}
+            writer.print(f"[bold green]VALID[/bold green] — {args.file} is a valid Azure RBAC export.")
+            writer.print(f"  Assignments     : {len(iam.assignments)}")
+            writer.print(f"  Unique Principals: {len(unique)}")
+            writer.print(f"  Role Definitions : {len(iam.definitions)}")
+            writer.print(f"  Service Principals: {len(iam.service_principals)}")
         except Exception as exc:
             writer.print(f"[bold red]INVALID[/bold red] — {exc}")
             return 2
@@ -1722,7 +1843,35 @@ def _handle_watch(writer: OutputWriter, args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_export_azure(writer: OutputWriter, args: argparse.Namespace) -> int:
+    """Azure export — uses azure_exporter directly (supports JSON/CSV/SARIF/HTML)."""
+    try:
+        iam = parse_azure_file(args.file)
+    except Exception as exc:
+        writer.print(f"[bold red]Error parsing Azure file:[/bold red] {exc}")
+        return 2
+
+    az_findings = run_azure_detections(iam)
+    az_score = score_azure(az_findings, iam)
+    az_blast = calculate_azure_blast_radius(iam)
+
+    output_path = args.output or "azure_export.json"
+    try:
+        export_azure(az_findings, az_score, az_blast, iam, output_path)
+        writer.print(
+            f"[bold green]Exported[/bold green] {len(az_findings)} finding(s) "
+            f"-> {output_path}"
+        )
+    except Exception as exc:
+        writer.print(f"[bold red]Export error:[/bold red] {exc}")
+        return 2
+    return 0
+
+
 def _handle_export(writer: OutputWriter, args: argparse.Namespace) -> int:
+    cloud = getattr(args, "cloud", "gcp")
+    if cloud == "azure":
+        return _handle_export_azure(writer, args)
     result, fmt, output_path = run_export(args.file, args.output, args.format, cloud=args.cloud)
     writer.print(f"[bold green]Exported[/bold green] {len(result.findings)} finding(s) as {fmt.upper()} -> {output_path}")
     return determine_exit_code(result.findings)
@@ -1820,6 +1969,39 @@ def _handle_live_scan(writer: OutputWriter, args: argparse.Namespace) -> int:
         gcp_findings = _aws_findings_to_gcp(aws_findings)
         risk = RiskScorer().score(gcp_findings)
 
+        min_severity = SEVERITY_CHOICES[args.severity]
+        displayed = filter_by_severity(gcp_findings, min_severity)
+        render_findings(writer, displayed)
+        render_risk_score(writer, risk)
+        return determine_exit_code(gcp_findings)
+
+    # ── Azure live scan ─────────────────────────────────────────────────────
+    if cloud == "azure":
+        subscription = getattr(args, "subscription", None)
+        writer.print(
+            f"[bold cyan]Fetching live Azure RBAC data[/bold cyan] "
+            f"(subscription={subscription or 'current active'})"
+        )
+        try:
+            iam = fetch_azure_live(
+                subscription=subscription,
+                save_path=getattr(args, "save", None),
+            )
+        except SystemExit:
+            return 2
+        except Exception as exc:
+            writer.print(f"[bold red]Azure Error:[/bold red] {exc}")
+            return 2
+
+        unique = {a.principal_name for a in iam.assignments}
+        writer.print(
+            f"[bold green]Fetched:[/bold green] "
+            f"{len(iam.assignments)} assignment(s), {len(unique)} unique principal(s)"
+        )
+        az_findings = run_azure_detections(iam)
+        az_score = score_azure(az_findings, iam)
+        gcp_findings = _azure_findings_to_gcp(az_findings)
+        risk = RiskScorer().score(gcp_findings)
         min_severity = SEVERITY_CHOICES[args.severity]
         displayed = filter_by_severity(gcp_findings, min_severity)
         render_findings(writer, displayed)

@@ -25,7 +25,7 @@ class TestRunScan:
 
     def test_unsupported_cloud_raises(self, sample_json_file):
         with pytest.raises(ValueError, match="Unsupported cloud provider"):
-            cli.run_scan(str(sample_json_file), cloud="azure")
+            cli.run_scan(str(sample_json_file), cloud="gcloud")
 
 
 class TestFilterBySeverity:
