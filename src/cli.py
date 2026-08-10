@@ -79,6 +79,12 @@ from multi_pdf_report import generate_multi_pdf
 # Azure AD / Entra ID
 from azure_ad_parser import parse_azure_ad_file, AzureADData
 from azure_ad_detection import run_azure_ad_detections, AzureADFinding, get_azure_ad_rules
+
+# AWS Blast Radius
+from aws_blast_radius import calculate_aws_blast_radius, AWSBlastResult
+
+# Terraform Scanner
+from terraform_scanner import scan_terraform_file, scan_terraform_directory, get_terraform_rules, TerraformFinding
 from azure_detection import run_azure_detections, AzureFinding, get_azure_rules
 from azure_risk_score import score_azure, AzureScoreResult
 from azure_blast_radius import calculate_azure_blast_radius
@@ -203,12 +209,7 @@ def run_scan(file_path: str, cloud: str = "gcp") -> ScanResult:
 
 
 def _run_scan_aws(file_path: str) -> ScanResult:
-    """AWS scan pipeline: parse -> graph -> detect -> score.
-    Blast radius and escalation edges are not yet supported for AWS
-    (GCP blast_radius.py is GCP-graph-specific); stubs are returned so
-    the rest of the CLI (render_findings, render_risk_score, export) works
-    identically for both clouds.
-    """
+    """AWS scan pipeline: parse -> graph -> detect -> score -> blast radius."""
     from detection import Severity as GCPSeverity  # reuse for RiskScorer
 
     aws_policy = AWSIAMParser().parse_file(file_path)
@@ -219,15 +220,17 @@ def _run_scan_aws(file_path: str) -> ScanResult:
     gcp_findings = _aws_findings_to_gcp(aws_findings)
     risk = RiskScorer().score(gcp_findings)
 
-    # Return a ScanResult with stubs for GCP-only fields
+    # AWS Blast Radius
+    aws_blast = calculate_aws_blast_radius(aws_graph, aws_findings)
+
     return ScanResult(
         source_file=file_path,
         cloud="aws",
-        policy=aws_policy,      # type: ignore[arg-type]  — renderers use .summary() only
-        graph=aws_graph,        # type: ignore[arg-type]  — renderers use findings directly
+        policy=aws_policy,      # type: ignore[arg-type]
+        graph=aws_graph,        # type: ignore[arg-type]
         findings=gcp_findings,
         risk=risk,
-        blast_radius=[],
+        blast_radius=aws_blast,  # type: ignore[arg-type]
         escalation_edges=[],
     )
 
@@ -1329,15 +1332,28 @@ def render_risk_score(writer: OutputWriter, risk: RiskScore) -> None:
     )
 
 
-def render_blast_radius(writer: OutputWriter, results: list[BlastRadiusResult], top_n: int) -> None:
+def render_blast_radius(writer: OutputWriter, results: list, top_n: int) -> None:
+    """Renders blast radius for GCP, AWS, and Azure results."""
     writer.print("[bold]── Blast Radius (highest risk first) ─────────────────[/bold]")
     shown = results[: max(0, top_n)]
     if not shown:
         writer.print("(no principals to show)\n")
         return
     for r in shown:
-        reaches = ", ".join(r.reachable_principals) if r.reachable_principals else "(nothing further)"
-        writer.print(f"  {r.principal_id:<45} [bold]{r.percentage:>6.1f}%[/bold]  -> {reaches}")
+        # AWS BlastResult
+        if hasattr(r, "blast_score"):
+            level = r.blast_level
+            name  = getattr(r, "principal_name", r.principal_id)
+            pct   = r.percentage
+            reach = len(r.reachable_principals)
+            writer.print(
+                f"  {name:<40} [bold]{pct:>6.1f}%[/bold]  "
+                f"Score: {r.blast_score}/100 ({level})  Reaches: {reach} principal(s)"
+            )
+        else:
+            # GCP BlastResult
+            reaches = ", ".join(r.reachable_principals[:3]) if r.reachable_principals else "(nothing further)"
+            writer.print(f"  {r.principal_id:<45} [bold]{r.percentage:>6.1f}%[/bold]  -> {reaches}")
     writer.print("")
 
 
@@ -1374,6 +1390,13 @@ def render_rules_list(writer: OutputWriter) -> None:
 
     writer.print("[bold]── Azure AD / Entra ID Detection Rules ──────────────[/bold]")
     for rule in get_azure_ad_rules():
+        color = sev_color.get(rule["severity"], "white")
+        writer.print(f"[{color}]{rule['id']}[/{color}] {rule['title']}  ({rule['severity']})")
+        writer.print(f"  MITRE: {rule['mitre']}")
+    writer.print("")
+
+    writer.print("[bold]── Terraform IaC Detection Rules ────────────────────[/bold]")
+    for rule in get_terraform_rules():
         color = sev_color.get(rule["severity"], "white")
         writer.print(f"[{color}]{rule['id']}[/{color}] {rule['title']}  ({rule['severity']})")
         writer.print(f"  MITRE: {rule['mitre']}")
@@ -1568,6 +1591,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     blast_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws", "azure", "azure-ad"], help="Cloud provider.")
     blast_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     blast_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
+
+    # terraform command
+    tf_parser = subparsers.add_parser(
+        "terraform",
+        help="Scan Terraform .tf files for IAM misconfigurations before deployment.",
+    )
+    tf_parser.add_argument("--path", "-p", required=True, metavar="PATH",
+        help="Path to a .tf file or directory containing .tf files.")
+    tf_parser.add_argument("--output", "-o", default=None, metavar="FILE",
+        help="Optional: save findings as JSON (e.g. tf-findings.json).")
+    tf_parser.add_argument("--no-color",  action="store_true", help="Disable colored output.")
+    tf_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
     # report-multi command
     rmp = subparsers.add_parser(
@@ -1812,6 +1847,58 @@ def _handle_blast_radius(writer: OutputWriter, args: argparse.Namespace) -> int:
         return 2
     render_single_blast_radius(writer, match)
     return 0
+
+
+def _handle_terraform(writer: OutputWriter, args: argparse.Namespace) -> int:
+    """Scan Terraform .tf files for IAM misconfigurations."""
+    path = args.path
+    from pathlib import Path as _Path
+
+    writer.print(f"[bold cyan]Scanning Terraform files:[/bold cyan] {path}")
+
+    try:
+        if _Path(path).is_dir():
+            findings = scan_terraform_directory(path)
+        else:
+            findings = scan_terraform_file(path)
+    except Exception as exc:
+        writer.print(f"[bold red]Error:[/bold red] {exc}")
+        return 2
+
+    if not findings:
+        writer.print("[bold green]No findings![/bold green] Terraform files look clean.")
+        return 0
+
+    SEV_COLOR_TF = {"CRITICAL": "red", "HIGH": "yellow", "MEDIUM": "blue", "LOW": "green"}
+    writer.print(f"[bold]── Terraform Findings ({len(findings)} total) ─────────────────[/bold]")
+    for f in findings:
+        color = SEV_COLOR_TF.get(f.severity, "white")
+        writer.print(
+            f"[{color}][{f.severity}][/{color}] [{color}]{f.rule_id}[/{color}] {f.title}"
+        )
+        writer.print(f"  File    : {f.file_path}:{f.line_number}")
+        writer.print(f"  Resource: {f.resource_type}.{f.resource_name}")
+        writer.print(f"  MITRE   : {f.mitre_technique}")
+        writer.print(f"  Fix     : {f.remediation[:90]}")
+        writer.print("")
+
+    critical = sum(1 for f in findings if f.severity == "CRITICAL")
+    writer.print(f"[bold]Total: {len(findings)} finding(s) — {critical} CRITICAL[/bold]")
+
+    # Export if requested
+    output = getattr(args, "output", None)
+    if output:
+        import json as _json
+        data = [{
+            "rule_id": f.rule_id, "title": f.title, "severity": f.severity,
+            "file": f.file_path, "line": f.line_number,
+            "resource": f"{f.resource_type}.{f.resource_name}",
+            "mitre": f.mitre_technique, "remediation": f.remediation,
+        } for f in findings]
+        _Path(output).write_text(_json.dumps(data, indent=2), encoding="utf-8")
+        writer.print(f"[bold green]Exported:[/bold green] {output}")
+
+    return 1 if critical > 0 else 0
 
 
 def _handle_report_multi(writer: OutputWriter, args: argparse.Namespace) -> int:
@@ -2261,6 +2348,8 @@ def main(argv: list[str] | None = None) -> int:
             return _handle_scan(writer, args)
         if args.command == "blast-radius":
             return _handle_blast_radius(writer, args)
+        if args.command == "terraform":
+            return _handle_terraform(writer, args)
         if args.command == "report-multi":
             return _handle_report_multi(writer, args)
         if args.command == "dashboard":
