@@ -83,6 +83,9 @@ from azure_ad_detection import run_azure_ad_detections, AzureADFinding, get_azur
 # AWS Blast Radius
 from aws_blast_radius import calculate_aws_blast_radius, AWSBlastResult
 
+# Cross-Cloud Attack Chain Detection
+from cross_cloud_detector import detect_cross_cloud_chains, CrossCloudFinding
+
 # Terraform Scanner
 from terraform_scanner import scan_terraform_file, scan_terraform_directory, get_terraform_rules, TerraformFinding
 from azure_detection import run_azure_detections, AzureFinding, get_azure_rules
@@ -1592,6 +1595,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     blast_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     blast_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
+    # cross-cloud command
+    cc_parser = subparsers.add_parser(
+        "cross-cloud",
+        help="Detect attack chains that span multiple clouds (AWS→Azure, GCP→AWS, etc.).",
+    )
+    cc_parser.add_argument("--gcp",   default=None, metavar="FILE", help="GCP IAM JSON export.")
+    cc_parser.add_argument("--aws",   default=None, metavar="FILE", help="AWS IAM JSON export.")
+    cc_parser.add_argument("--azure", default=None, metavar="FILE", help="Azure RBAC JSON export.")
+    cc_parser.add_argument("--output", "-o", default=None, metavar="FILE",
+        help="Save findings as JSON (e.g. cross-cloud-findings.json).")
+    cc_parser.add_argument("--no-color",  action="store_true", help="Disable colored output.")
+    cc_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
+
     # terraform command
     tf_parser = subparsers.add_parser(
         "terraform",
@@ -1847,6 +1863,138 @@ def _handle_blast_radius(writer: OutputWriter, args: argparse.Namespace) -> int:
         return 2
     render_single_blast_radius(writer, match)
     return 0
+
+
+def _handle_cross_cloud(writer: OutputWriter, args: argparse.Namespace) -> int:
+    """Cross-cloud attack chain detection."""
+    gcp_file   = getattr(args, "gcp", None)
+    aws_file   = getattr(args, "aws", None)
+    azure_file = getattr(args, "azure", None)
+
+    provided = [f for f in [gcp_file, aws_file, azure_file] if f]
+    if len(provided) < 2:
+        writer.print("[bold red]Error:[/bold red] Provide at least 2 cloud files.")
+        writer.print("  --gcp gcp.json --aws aws.json --azure azure.json")
+        return 2
+
+    writer.print("[bold cyan]Cross-Cloud Attack Chain Detection[/bold cyan]")
+    writer.print(f"  Clouds provided: {len(provided)}")
+
+    # Load each cloud
+    aws_graph = aws_findings_list = None
+    az_iam = az_findings_list = None
+    gcp_graph_obj = gcp_findings_list = None
+
+    if aws_file:
+        writer.print(f"  Loading AWS   : {aws_file}")
+        try:
+            from aws_parser import AWSIAMParser
+            from aws_graph import AWSIAMGraph
+            from aws_detection import AWSDetectionEngine
+            aws_policy   = AWSIAMParser().parse_file(aws_file)
+            aws_graph    = AWSIAMGraph.from_policy(aws_policy)
+            aws_findings_list = AWSDetectionEngine().run(aws_graph)
+        except Exception as exc:
+            writer.print(f"  [yellow]AWS load error:[/yellow] {exc}")
+
+    if azure_file:
+        writer.print(f"  Loading Azure : {azure_file}")
+        try:
+            from azure_parser import parse_azure_file
+            from azure_detection import run_azure_detections
+            az_iam = parse_azure_file(azure_file)
+            az_findings_list = run_azure_detections(az_iam)
+        except Exception as exc:
+            writer.print(f"  [yellow]Azure load error:[/yellow] {exc}")
+
+    if gcp_file:
+        writer.print(f"  Loading GCP   : {gcp_file}")
+        try:
+            from parser import GCPIAMParser
+            from graph import IAMGraph
+            from detection import DetectionEngine
+            gcp_policy = GCPIAMParser().parse_file(gcp_file)
+            gcp_graph_obj = IAMGraph.from_policy(gcp_policy)
+            gcp_findings_list = DetectionEngine().run(gcp_graph_obj)
+        except Exception as exc:
+            writer.print(f"  [yellow]GCP load error:[/yellow] {exc}")
+
+    writer.print("")
+    writer.print("[bold]Analyzing cross-cloud attack chains...[/bold]")
+
+    try:
+        chains = detect_cross_cloud_chains(
+            aws_graph=aws_graph,        aws_findings=aws_findings_list,
+            azure_iam=az_iam,           azure_findings=az_findings_list,
+            gcp_graph=gcp_graph_obj,    gcp_findings=gcp_findings_list,
+        )
+    except Exception as exc:
+        writer.print(f"[bold red]Error:[/bold red] {exc}")
+        return 2
+
+    if not chains:
+        writer.print("[bold green]No cross-cloud attack chains detected.[/bold green]")
+        writer.print("Clouds appear to be properly isolated.")
+        return 0
+
+    SEV_COLOR = {"CRITICAL": "red", "HIGH": "yellow", "MEDIUM": "blue"}
+    writer.print(f"[bold]── Cross-Cloud Attack Chains ({len(chains)} detected) ─────────[/bold]")
+    writer.print("")
+
+    for f in chains:
+        color = SEV_COLOR.get(f.severity, "white")
+        writer.print(f"[{color}][{f.severity}][/{color}] [bold]{f.finding_id}[/bold] — {f.title}")
+        writer.print(f"  Source  : {f.source_principal} ({f.source_cloud})")
+        writer.print(f"  Target  : {f.target_principal} ({f.target_cloud})")
+        writer.print(f"  Bridge  : {f.bridge_mechanism}")
+        writer.print(f"  MITRE   : {', '.join(f.mitre_techniques)}")
+        writer.print(f"  Impact  : {f.impact[:100]}")
+        writer.print("")
+        writer.print("  [bold]Attack Chain:[/bold]")
+        for step in f.attack_chain:
+            bridge = " [cyan][CROSS-CLOUD PIVOT][/cyan]" if step.is_bridge else ""
+            writer.print(f"    Step {step.step_number} [{step.cloud}]{bridge}")
+            writer.print(f"      {step.principal} → {step.action} → {step.target}")
+        writer.print("")
+        writer.print(f"  [bold]Remediation:[/bold] {f.remediation[:120]}")
+        writer.print("─" * 60)
+        writer.print("")
+
+    # Save output
+    output = getattr(args, "output", None)
+    if output:
+        import json as _json
+        from pathlib import Path as _Path
+        data = []
+        for f in chains:
+            data.append({
+                "finding_id": f.finding_id,
+                "title": f.title,
+                "severity": f.severity,
+                "source_cloud": f.source_cloud,
+                "target_cloud": f.target_cloud,
+                "source_principal": f.source_principal,
+                "target_principal": f.target_principal,
+                "bridge_mechanism": f.bridge_mechanism,
+                "mitre_techniques": list(f.mitre_techniques),
+                "impact": f.impact,
+                "remediation": f.remediation,
+                "attack_chain": [
+                    {
+                        "step": s.step_number,
+                        "cloud": s.cloud,
+                        "principal": s.principal,
+                        "action": s.action,
+                        "target": s.target,
+                        "is_bridge": s.is_bridge,
+                    } for s in f.attack_chain
+                ],
+            })
+        _Path(output).write_text(_json.dumps(data, indent=2), encoding="utf-8")
+        writer.print(f"[bold green]Saved:[/bold green] {output}")
+
+    critical = sum(1 for f in chains if f.severity == "CRITICAL")
+    return 1 if critical > 0 else 0
 
 
 def _handle_terraform(writer: OutputWriter, args: argparse.Namespace) -> int:
@@ -2348,6 +2496,8 @@ def main(argv: list[str] | None = None) -> int:
             return _handle_scan(writer, args)
         if args.command == "blast-radius":
             return _handle_blast_radius(writer, args)
+        if args.command == "cross-cloud":
+            return _handle_cross_cloud(writer, args)
         if args.command == "terraform":
             return _handle_terraform(writer, args)
         if args.command == "report-multi":
