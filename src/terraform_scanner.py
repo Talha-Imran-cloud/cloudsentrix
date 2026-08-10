@@ -576,3 +576,163 @@ if __name__ == "__main__":
         print(f"  MITRE    : {f.mitre_technique}")
         print(f"  Fix      : {f.remediation[:80]}...")
         print()
+
+
+# ---------------------------------------------------------------------------
+# Terraform State File Scanner
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class TfstateFinding:
+    rule_id: str
+    title: str
+    severity: str
+    file_path: str
+    resource_type: str
+    resource_name: str
+    secret_type: str
+    description: str
+    mitre_technique: str
+    remediation: str
+    evidence: str
+
+
+# Sensitive attribute names that indicate leaked secrets
+SENSITIVE_ATTR_NAMES = frozenset({
+    "password", "secret", "private_key", "secret_key", "access_key",
+    "api_key", "token", "credential", "private_key_pem", "client_secret",
+    "primary_access_key", "secondary_access_key", "connection_string",
+    "sas_token", "shared_access_key", "auth_token", "secret_string",
+    "secret_binary", "value",  # azure key vault secret value
+})
+
+# Resource types that commonly contain secrets
+SECRET_RESOURCE_TYPES = frozenset({
+    "aws_db_instance", "aws_rds_cluster", "aws_iam_access_key",
+    "aws_secretsmanager_secret_version", "aws_ssm_parameter",
+    "google_service_account_key", "google_sql_user",
+    "azurerm_key_vault_secret", "azurerm_sql_server",
+    "kubernetes_secret", "helm_release",
+    "random_password",
+})
+
+
+def _is_real_secret(value: str) -> bool:
+    """Check if value looks like a real secret (not a placeholder)."""
+    if not isinstance(value, str):
+        return False
+    if len(value) < 8:
+        return False
+    placeholders = {"", "null", "none", "placeholder", "changeme",
+                    "example", "xxxx", "****", "redacted"}
+    if value.lower() in placeholders:
+        return False
+    if value.startswith("${"):  # Terraform reference
+        return False
+    return True
+
+
+def _scan_attributes(attrs: dict, resource_type: str,
+                     resource_name: str, path: str) -> list[TfstateFinding]:
+    """Recursively scan resource attributes for secrets."""
+    findings = []
+
+    def _recurse(obj: Any, attr_path: str = "") -> None:
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                full_path = f"{attr_path}.{k}" if attr_path else k
+                k_lower = k.lower()
+                if any(s in k_lower for s in SENSITIVE_ATTR_NAMES):
+                    if _is_real_secret(str(v)):
+                        masked = str(v)[:4] + "..." + str(v)[-2:] if len(str(v)) > 8 else "***"
+                        findings.append(TfstateFinding(
+                            rule_id="TFS-001",
+                            title="Secret Leaked in Terraform State",
+                            severity="CRITICAL",
+                            file_path=path,
+                            resource_type=resource_type,
+                            resource_name=resource_name,
+                            secret_type=k,
+                            description=(
+                                f"Resource '{resource_type}.{resource_name}' has "
+                                f"attribute '{full_path}' containing a plaintext secret. "
+                                "Terraform state files are stored unencrypted by default — "
+                                "anyone with state access can read this secret."
+                            ),
+                            mitre_technique="T1552.001",
+                            remediation=(
+                                "1. Rotate this secret immediately. "
+                                "2. Use remote state with encryption (S3+KMS, Azure Storage, GCS). "
+                                "3. Use sensitive=true in Terraform variables. "
+                                "4. Store secrets in Vault/AWS Secrets Manager, not in state."
+                            ),
+                            evidence=f"{full_path} = {masked}",
+                        ))
+                _recurse(v, full_path)
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj):
+                _recurse(item, f"{attr_path}[{i}]")
+
+    _recurse(attrs)
+    return findings
+
+
+def scan_tfstate_file(path: str) -> list[TfstateFinding]:
+    """
+    Scan a Terraform state file (.tfstate) for leaked secrets.
+
+    Terraform state files store the actual values of all resources —
+    including passwords, private keys, and API keys — in plaintext JSON.
+    This scanner detects those leaks.
+
+    Args:
+        path: Path to a .tfstate file
+
+    Returns:
+        list of TfstateFinding objects
+    """
+    try:
+        state = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"[tfstate-scan] Could not read {path}: {exc}")
+        return []
+
+    if not isinstance(state, dict):
+        return []
+
+    all_findings: list[TfstateFinding] = []
+    resources = state.get("resources", [])
+
+    print(f"[tfstate-scan] Scanning {len(resources)} resource(s) in {path}")
+
+    for resource in resources:
+        if not isinstance(resource, dict):
+            continue
+        res_type = resource.get("type", "unknown")
+        res_name = resource.get("name", "unknown")
+
+        for instance in resource.get("instances", []):
+            attrs = instance.get("attributes", {})
+            if not attrs:
+                continue
+            findings = _scan_attributes(attrs, res_type, res_name, path)
+            all_findings.extend(findings)
+
+    # Deduplicate
+    seen: set[tuple] = set()
+    unique: list[TfstateFinding] = []
+    for f in all_findings:
+        key = (f.resource_type, f.resource_name, f.secret_type)
+        if key not in seen:
+            seen.add(key)
+            unique.append(f)
+
+    print(f"[tfstate-scan] Found {len(unique)} secret(s) in state file")
+    return unique
+
+
+def get_tfstate_rules() -> list[dict]:
+    return [
+        {"id": "TFS-001", "title": "Secret Leaked in Terraform State File",
+         "severity": "CRITICAL", "mitre": "T1552.001"},
+    ]

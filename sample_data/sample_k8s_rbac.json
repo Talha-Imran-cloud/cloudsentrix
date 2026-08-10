@@ -1,0 +1,51 @@
+{
+  "kind": "List",
+  "apiVersion": "v1",
+  "items": [
+    {
+      "kind": "ClusterRoleBinding",
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "metadata": {"name": "dangerous-admin-binding"},
+      "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "cluster-admin"},
+      "subjects": [{"kind": "ServiceAccount", "name": "deploy-bot", "namespace": "ci-cd"}]
+    },
+    {
+      "kind": "ClusterRoleBinding",
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "metadata": {"name": "anonymous-reader"},
+      "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "view"},
+      "subjects": [{"kind": "User", "name": "system:anonymous"}]
+    },
+    {
+      "kind": "ClusterRole",
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "metadata": {"name": "wildcard-role"},
+      "rules": [{"apiGroups": ["*"], "resources": ["*"], "verbs": ["*"]}]
+    },
+    {
+      "kind": "ClusterRole",
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "metadata": {"name": "secrets-reader"},
+      "rules": [{"apiGroups": [""], "resources": ["secrets", "configmaps"], "verbs": ["get", "list", "watch"]}]
+    },
+    {
+      "kind": "RoleBinding",
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "metadata": {"name": "default-sa-admin", "namespace": "production"},
+      "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "admin"},
+      "subjects": [{"kind": "ServiceAccount", "name": "default", "namespace": "production"}]
+    },
+    {
+      "kind": "ClusterRole",
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "metadata": {"name": "pod-exec-role"},
+      "rules": [{"apiGroups": [""], "resources": ["pods/exec", "pods/attach"], "verbs": ["create", "get"]}]
+    },
+    {
+      "kind": "ClusterRole",
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "metadata": {"name": "safe-readonly"},
+      "rules": [{"apiGroups": [""], "resources": ["pods", "services"], "verbs": ["get", "list", "watch"]}]
+    }
+  ]
+}

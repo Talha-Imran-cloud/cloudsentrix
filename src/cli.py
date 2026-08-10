@@ -87,7 +87,9 @@ from aws_blast_radius import calculate_aws_blast_radius, AWSBlastResult
 from cross_cloud_detector import detect_cross_cloud_chains, CrossCloudFinding
 
 # Terraform Scanner
-from terraform_scanner import scan_terraform_file, scan_terraform_directory, get_terraform_rules, TerraformFinding
+from terraform_scanner import (scan_terraform_file, scan_terraform_directory, get_terraform_rules, TerraformFinding,
+    scan_tfstate_file, get_tfstate_rules, TfstateFinding)
+from k8s_scanner import scan_k8s_file, scan_k8s_directory, get_k8s_rules, K8sFinding
 from azure_detection import run_azure_detections, AzureFinding, get_azure_rules
 from azure_risk_score import score_azure, AzureScoreResult
 from azure_blast_radius import calculate_azure_blast_radius
@@ -1403,6 +1405,17 @@ def render_rules_list(writer: OutputWriter) -> None:
         color = sev_color.get(rule["severity"], "white")
         writer.print(f"[{color}]{rule['id']}[/{color}] {rule['title']}  ({rule['severity']})")
         writer.print(f"  MITRE: {rule['mitre']}")
+    for rule in get_tfstate_rules():
+        color = sev_color.get(rule["severity"], "white")
+        writer.print(f"[{color}]{rule['id']}[/{color}] {rule['title']}  ({rule['severity']})")
+        writer.print(f"  MITRE: {rule['mitre']}")
+    writer.print("")
+
+    writer.print("[bold]── Kubernetes RBAC Detection Rules ──────────────────[/bold]")
+    for rule in get_k8s_rules():
+        color = sev_color.get(rule["severity"], "white")
+        writer.print(f"[{color}]{rule['id']}[/{color}] {rule['title']}  ({rule['severity']})")
+        writer.print(f"  MITRE: {rule['mitre']}")
     writer.print("")
 
 
@@ -1607,6 +1620,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Save findings as JSON (e.g. cross-cloud-findings.json).")
     cc_parser.add_argument("--no-color",  action="store_true", help="Disable colored output.")
     cc_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
+
+    # k8s command
+    k8s_parser = subparsers.add_parser(
+        "k8s",
+        help="Scan Kubernetes RBAC files for privilege-escalation risks.",
+    )
+    k8s_parser.add_argument("--path", "-p", required=True, metavar="PATH",
+        help="Path to a K8s RBAC JSON/YAML file or directory.")
+    k8s_parser.add_argument("--output", "-o", default=None, metavar="FILE",
+        help="Save findings as JSON.")
+    k8s_parser.add_argument("--no-color",  action="store_true")
+    k8s_parser.add_argument("--no-banner", action="store_true")
 
     # terraform command
     tf_parser = subparsers.add_parser(
@@ -1997,15 +2022,97 @@ def _handle_cross_cloud(writer: OutputWriter, args: argparse.Namespace) -> int:
     return 1 if critical > 0 else 0
 
 
-def _handle_terraform(writer: OutputWriter, args: argparse.Namespace) -> int:
-    """Scan Terraform .tf files for IAM misconfigurations."""
+def _handle_k8s(writer: OutputWriter, args: argparse.Namespace) -> int:
+    """Scan Kubernetes RBAC files for privilege-escalation risks."""
     path = args.path
     from pathlib import Path as _Path
 
-    writer.print(f"[bold cyan]Scanning Terraform files:[/bold cyan] {path}")
+    writer.print(f"[bold cyan]Scanning Kubernetes RBAC:[/bold cyan] {path}")
 
     try:
         if _Path(path).is_dir():
+            findings = scan_k8s_directory(path)
+        else:
+            findings = scan_k8s_file(path)
+    except Exception as exc:
+        writer.print(f"[bold red]Error:[/bold red] {exc}")
+        return 2
+
+    if not findings:
+        writer.print("[bold green]No findings![/bold green] K8s RBAC looks clean.")
+        return 0
+
+    SEV_COLOR = {"CRITICAL": "red", "HIGH": "yellow", "MEDIUM": "blue", "LOW": "green"}
+    writer.print(f"[bold]── Kubernetes RBAC Findings ({len(findings)} total) ──────────[/bold]")
+    for f in findings:
+        color = SEV_COLOR.get(f.severity, "white")
+        writer.print(f"[{color}][{f.severity}][/{color}] [{color}]{f.rule_id}[/{color}] {f.title}")
+        writer.print(f"  Resource : {f.resource_kind}/{f.resource_name}")
+        writer.print(f"  Subject  : {f.subject}")
+        writer.print(f"  MITRE    : {f.mitre_technique}")
+        writer.print(f"  Details  : {f.description[:100]}")
+        writer.print(f"  Fix      : {f.remediation[:90]}")
+        writer.print("")
+
+    critical = sum(1 for f in findings if f.severity == "CRITICAL")
+    writer.print(f"[bold]Total: {len(findings)} finding(s) — {critical} CRITICAL[/bold]")
+
+    output = getattr(args, "output", None)
+    if output:
+        import json as _json
+        data = [{"rule_id": f.rule_id, "title": f.title, "severity": f.severity,
+                 "resource": f"{f.resource_kind}/{f.resource_name}",
+                 "subject": f.subject, "mitre": f.mitre_technique,
+                 "remediation": f.remediation} for f in findings]
+        _Path(output).write_text(_json.dumps(data, indent=2), encoding="utf-8")
+        writer.print(f"[bold green]Exported:[/bold green] {output}")
+
+    return 1 if critical > 0 else 0
+
+
+def _handle_terraform(writer: OutputWriter, args: argparse.Namespace) -> int:
+    """Scan Terraform .tf files and .tfstate files for IAM misconfigurations and secrets."""
+    path = args.path
+    from pathlib import Path as _Path
+
+    writer.print(f"[bold cyan]Scanning Terraform:[/bold cyan] {path}")
+
+    # Check if tfstate file
+    p = _Path(path)
+    if p.is_file() and p.suffix == ".tfstate":
+        writer.print("[bold]Mode:[/bold] Terraform State File (secret leak detection)")
+        try:
+            state_findings = scan_tfstate_file(path)
+        except Exception as exc:
+            writer.print(f"[bold red]Error:[/bold red] {exc}")
+            return 2
+
+        if not state_findings:
+            writer.print("[bold green]No secrets found in state file.[/bold green]")
+            return 0
+
+        writer.print(f"[bold]── State File Findings ({len(state_findings)} secrets found) ──[/bold]")
+        for f in state_findings:
+            writer.print(f"[red][CRITICAL][/red] [red]{f.rule_id}[/red] — {f.title}")
+            writer.print(f"  Resource : {f.resource_type}.{f.resource_name}")
+            writer.print(f"  Secret   : {f.secret_type}")
+            writer.print(f"  Evidence : {f.evidence}")
+            writer.print(f"  Fix      : {f.remediation[:100]}")
+            writer.print("")
+
+        output = getattr(args, "output", None)
+        if output:
+            import json as _json
+            data = [{"rule_id": f.rule_id, "resource": f"{f.resource_type}.{f.resource_name}",
+                     "secret_type": f.secret_type, "evidence": f.evidence,
+                     "remediation": f.remediation} for f in state_findings]
+            _Path(output).write_text(_json.dumps(data, indent=2), encoding="utf-8")
+            writer.print(f"[bold green]Exported:[/bold green] {output}")
+        return 1  # CRITICAL findings
+
+    writer.print("[bold]Mode:[/bold] Terraform IaC (.tf files)")
+    try:
+        if p.is_dir():
             findings = scan_terraform_directory(path)
         else:
             findings = scan_terraform_file(path)
@@ -2498,6 +2605,8 @@ def main(argv: list[str] | None = None) -> int:
             return _handle_blast_radius(writer, args)
         if args.command == "cross-cloud":
             return _handle_cross_cloud(writer, args)
+        if args.command == "k8s":
+            return _handle_k8s(writer, args)
         if args.command == "terraform":
             return _handle_terraform(writer, args)
         if args.command == "report-multi":
