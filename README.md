@@ -1,8 +1,15 @@
-# CloudSentrix 🔐
+```
+   _____ _                 _  _____            _      _      
+  / ____| |               | |/ ____|          | |    (_)     
+ | |    | | ___  _   _  __| | (___   ___ _ __ | |_ _ ___  __
+ | |    | |/ _ \| | | |/ _` |\___ \ / _ \ '_ \| __| | \ \/ /
+ | |____| | (_) | |_| | (_| |____) |  __/ | | | |_| |  >  < 
+  \_____|_|\___/ \__,_|\__,_|_____/ \___|_| |_|\__|_|_/_/\_\
+```
 
 **Multi-Cloud IAM Privilege-Escalation Attack-Path Analyzer**
 
-CloudSentrix is a free, open-source CLI tool that scans **GCP, AWS, Azure, and Azure AD** IAM/RBAC policies for privilege-escalation risks — with interactive dashboards, PDF reports, Slack/Teams alerts, and CI/CD integration.
+CloudSentrix is a free, open-source CLI security tool that scans **GCP, AWS, Azure RBAC, and Azure AD** for privilege-escalation risks — with interactive dashboards, PDF reports, Slack/Teams alerts, and CI/CD integration. A free alternative to Wiz and Orca.
 
 [![CI](https://github.com/Talha-Imran-cloud/cloudsentrix/actions/workflows/ci.yml/badge.svg)](https://github.com/Talha-Imran-cloud/cloudsentrix/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/cloudsentrix)](https://pypi.org/project/cloudsentrix/)
@@ -16,27 +23,25 @@ CloudSentrix is a free, open-source CLI tool that scans **GCP, AWS, Azure, and A
 
 | Cloud | Rules | Live Scan | Dashboard | PDF |
 |-------|-------|-----------|-----------|-----|
-| ☁️ GCP | 5 rules | ✅ via gcloud | ✅ | ✅ |
-| 🟡 AWS | 7 rules | ✅ via boto3 + LocalStack | ✅ | ✅ |
-| 🔷 Azure RBAC | 5 rules | ✅ via az CLI | ✅ | ✅ |
-| 🔷 Azure AD / Entra ID | 6 rules | ✅ via az CLI | ✅ | ✅ |
+| ☁️ GCP | 5 rules | ✅ gcloud CLI | ✅ | ✅ |
+| 🟡 AWS | 7 rules | ✅ boto3 + LocalStack | ✅ | ✅ |
+| 🔷 Azure RBAC | 5 rules | ✅ az CLI | ✅ | ✅ |
+| 🔷 Azure AD / Entra ID | 6 rules | ✅ az CLI | ✅ | ✅ |
 | 🌐 Multi-Cloud | 23 rules total | — | ✅ Animated | ✅ Combined |
-
-**Every cloud → same commands, same output formats.**
 
 ---
 
 ## Key Features
 
-- **23 detection rules** across GCP, AWS, Azure RBAC, Azure AD — all MITRE ATT&CK mapped
+- **23 detection rules** — GCP, AWS, Azure RBAC, Azure AD — all MITRE ATT&CK mapped
 - **Blast radius** — if one account is compromised, how much can an attacker reach?
-- **Remediation** — exact `gcloud` / `aws` / `az` CLI fix commands
+- **Remediation** — exact `gcloud` / `aws` / `az` CLI fix commands per finding
 - **Multi-cloud HTML dashboard** — animated, all clouds side by side in one file
 - **Multi-cloud PDF report** — cover page, executive summary, per-cloud findings
 - **Slack / Teams alerts** — send findings to your team after every scan
 - **CI/CD templates** — GitHub Actions, GitLab CI, Jenkins — ready to use
 - **SARIF export** — upload directly to GitHub Security tab
-- **Watch mode** — auto-rescan on file change
+- **Watch mode** — auto-rescan when IAM file changes
 - **Gemini AI summaries** — plain-language executive reports
 
 ---
@@ -50,8 +55,18 @@ pip install cloudsentrix
 **Kali Linux / Debian:**
 ```bash
 pip install cloudsentrix --break-system-packages
-# OR
-pipx install cloudsentrix
+```
+
+**Virtual environment (recommended):**
+```bash
+python3 -m venv venv && source venv/bin/activate && pip install cloudsentrix
+```
+
+**Windows:**
+```powershell
+python -m venv venv
+venv\Scripts\activate
+pip install cloudsentrix
 ```
 
 **From source:**
@@ -82,7 +97,7 @@ az role assignment list --all --output json > azure_rbac.json
 az ad app list --all --output json > azure_ad.json
 ```
 
-**Sample files included:**
+**Sample files included for testing:**
 - `sample_data/sample_gcp_iam.json`
 - `sample_data/sample_aws_iam.json`
 - `sample_data/sample_azure_rbac.json`
@@ -92,121 +107,156 @@ az ad app list --all --output json > azure_ad.json
 
 ## Commands
 
+> **Windows note:** Use single-line commands. Multi-line `\` syntax does not work in PowerShell.
+
 ### `scan` — Full pipeline scan
 
 ```bash
+# GCP (default)
 cloudsentrix scan --file sample_data/sample_gcp_iam.json
+
+# AWS
 cloudsentrix scan --file sample_data/sample_aws_iam.json --cloud aws
+
+# Azure RBAC
 cloudsentrix scan --file sample_data/sample_azure_rbac.json --cloud azure
+
+# Azure AD / Entra ID
 cloudsentrix scan --file sample_data/sample_azure_ad.json --cloud azure-ad
-cloudsentrix scan --file my.json --cloud gcp --severity critical
-cloudsentrix scan --file my.json --cloud aws --notify slack
+
+# Filter by severity
+cloudsentrix scan --file sample_data/sample_aws_iam.json --cloud aws --severity critical
+
+# Scan + Slack alert
+cloudsentrix scan --file sample_data/sample_gcp_iam.json --notify slack
 ```
 
 ### `dashboard` — Multi-Cloud HTML Dashboard
 
 ```bash
-cloudsentrix dashboard \
-  --gcp   sample_data/sample_gcp_iam.json \
-  --aws   sample_data/sample_aws_iam.json \
-  --azure sample_data/sample_azure_rbac.json \
-  --output multi_cloud_dashboard.html
+# All three clouds (single line — works on all platforms)
+cloudsentrix dashboard --gcp sample_data/sample_gcp_iam.json --aws sample_data/sample_aws_iam.json --azure sample_data/sample_azure_rbac.json --output multi_cloud_dashboard.html
+
+# Two clouds only
+cloudsentrix dashboard --gcp sample_data/sample_gcp_iam.json --aws sample_data/sample_aws_iam.json --output dashboard.html
+
+# Open the dashboard (Windows)
+start multi_cloud_dashboard.html
+
+# Open the dashboard (Linux / macOS)
+xdg-open multi_cloud_dashboard.html
 ```
 
-Features: animated score counters, bar charts, severity breakdown, all findings table, floating particles, scroll animations.
+Dashboard features: animated score counters, bar charts, severity breakdown, all findings in one filterable table, floating particles, scroll animations.
 
 ### `report-multi` — Multi-Cloud PDF Report
 
 ```bash
-cloudsentrix report-multi \
-  --gcp   sample_data/sample_gcp_iam.json \
-  --aws   sample_data/sample_aws_iam.json \
-  --azure sample_data/sample_azure_rbac.json \
-  --output multi_cloud_report.pdf
+# All three clouds
+cloudsentrix report-multi --gcp sample_data/sample_gcp_iam.json --aws sample_data/sample_aws_iam.json --azure sample_data/sample_azure_rbac.json --output multi_cloud_report.pdf
+
+# Two clouds
+cloudsentrix report-multi --gcp sample_data/sample_gcp_iam.json --aws sample_data/sample_aws_iam.json --output report.pdf
 ```
 
-PDF includes: cover page, executive summary, per-cloud findings table, blast radius, MITRE mapping.
+PDF includes: cover page, executive summary, per-cloud findings table, blast radius top 5, MITRE mapping, timestamp.
 
 ### `report` — Single-Cloud PDF
 
 ```bash
-cloudsentrix report --file my_project.json --output report.pdf --no-ai
-cloudsentrix report --file aws_iam.json --cloud aws --output aws_report.pdf --no-ai
-cloudsentrix report --file azure_rbac.json --cloud azure --output azure_report.pdf --no-ai
+cloudsentrix report --file sample_data/sample_gcp_iam.json --output report.pdf --no-ai
+cloudsentrix report --file sample_data/sample_aws_iam.json --cloud aws --output aws_report.pdf --no-ai
+cloudsentrix report --file sample_data/sample_azure_rbac.json --cloud azure --output azure_report.pdf --no-ai
 ```
 
 ### `live-scan` — Scan Live Cloud Account
 
 ```bash
-# GCP
-gcloud auth application-default login
+# GCP (requires gcloud CLI)
 cloudsentrix live-scan --project my-gcp-project-id
+cloudsentrix live-scan --project my-gcp-project-id --save fetched_policy.json
 
-# AWS
+# AWS (requires boto3: pip install boto3)
 cloudsentrix live-scan --cloud aws
 cloudsentrix live-scan --cloud aws --profile my-profile --region us-west-2
-cloudsentrix live-scan --cloud aws --endpoint http://localhost:4566   # LocalStack
+cloudsentrix live-scan --cloud aws --save aws_policy.json
 
-# Azure
-az login
-cloudsentrix live-scan --cloud azure --subscription my-sub-id
+# AWS — LocalStack (no real AWS account needed)
+cloudsentrix live-scan --cloud aws --endpoint http://localhost:4566
 
-# Azure AD
-cloudsentrix live-scan --cloud azure-ad
+# Azure (requires az login)
+cloudsentrix live-scan --cloud azure
+cloudsentrix live-scan --cloud azure --subscription my-subscription-id --save azure_policy.json
 ```
 
 ### `export` — Export Results
 
 ```bash
-cloudsentrix export --file my.json --output dashboard.html         # HTML
-cloudsentrix export --file my.json --output report.json            # JSON
-cloudsentrix export --file my.json --output report.csv             # CSV
-cloudsentrix export --file my.json --output results.sarif          # SARIF
-cloudsentrix export --file aws.json --cloud aws --output aws.html
-cloudsentrix export --file azure_ad.json --cloud azure-ad --output azad.html
+# HTML interactive dashboard
+cloudsentrix export --file sample_data/sample_gcp_iam.json --output gcp_dashboard.html
+cloudsentrix export --file sample_data/sample_aws_iam.json --cloud aws --output aws_dashboard.html
+cloudsentrix export --file sample_data/sample_azure_rbac.json --cloud azure --output azure_dashboard.html
+cloudsentrix export --file sample_data/sample_azure_ad.json --cloud azure-ad --output azad_dashboard.html
+
+# JSON
+cloudsentrix export --file sample_data/sample_gcp_iam.json --output report.json
+
+# CSV
+cloudsentrix export --file sample_data/sample_aws_iam.json --cloud aws --output report.csv
+
+# SARIF (GitHub Code Scanning)
+cloudsentrix export --file sample_data/sample_gcp_iam.json --output results.sarif
 ```
 
 ### `score` — Security Score
 
 ```bash
-cloudsentrix score --file my.json
-cloudsentrix score --file aws.json --cloud aws --json
-cloudsentrix score --file my.json --min-score 70   # Fail if score < 70
+cloudsentrix score --file sample_data/sample_gcp_iam.json
+cloudsentrix score --file sample_data/sample_aws_iam.json --cloud aws
+cloudsentrix score --file sample_data/sample_azure_rbac.json --cloud azure --json
+cloudsentrix score --file sample_data/sample_gcp_iam.json --min-score 70
 ```
 
 ### `validate` — Validate File Format
 
 ```bash
-cloudsentrix validate --file my.json
-cloudsentrix validate --file aws.json --cloud aws
-cloudsentrix validate --file azure_rbac.json --cloud azure
-cloudsentrix validate --file azure_ad.json --cloud azure-ad
+cloudsentrix validate --file sample_data/sample_gcp_iam.json
+cloudsentrix validate --file sample_data/sample_aws_iam.json --cloud aws
+cloudsentrix validate --file sample_data/sample_azure_rbac.json --cloud azure
+cloudsentrix validate --file sample_data/sample_azure_ad.json --cloud azure-ad
+```
+
+### `list-principals` — List All Principals
+
+```bash
+cloudsentrix list-principals --file sample_data/sample_gcp_iam.json
+cloudsentrix list-principals --file sample_data/sample_aws_iam.json --cloud aws
+cloudsentrix list-principals --file sample_data/sample_azure_rbac.json --cloud azure
 ```
 
 ### `blast-radius` — Blast Radius (GCP)
 
 ```bash
-cloudsentrix blast-radius --file my.json --principal admin@company.com
+cloudsentrix blast-radius --file sample_data/sample_gcp_iam.json --principal admin@company.com
 ```
 
 ### `principal-path` — Escalation Path (GCP)
 
 ```bash
-cloudsentrix principal-path --file my.json \
-  --source intern@company.com \
-  --target sa@my-project.iam.gserviceaccount.com
+cloudsentrix principal-path --file sample_data/sample_gcp_iam.json --source intern@company.com --target sa@my-project.iam.gserviceaccount.com
 ```
 
 ### `mitre-map` — MITRE ATT&CK Mapping
 
 ```bash
-cloudsentrix mitre-map --file my.json
+cloudsentrix mitre-map --file sample_data/sample_gcp_iam.json
 ```
 
 ### `remediate` — Generate Fix Commands (GCP)
 
 ```bash
-cloudsentrix remediate --file my.json --severity critical
+cloudsentrix remediate --file sample_data/sample_gcp_iam.json
+cloudsentrix remediate --file sample_data/sample_gcp_iam.json --severity critical
 ```
 
 ### `compare` — Compare Two Exports
@@ -218,23 +268,15 @@ cloudsentrix compare --old january.json --new february.json
 ### `watch` — Auto-Rescan on File Change
 
 ```bash
-cloudsentrix watch --path my.json
-cloudsentrix watch --path azure_rbac.json --cloud azure --interval 5
-```
-
-### `list-principals` — List All Principals
-
-```bash
-cloudsentrix list-principals --file my.json
-cloudsentrix list-principals --file aws.json --cloud aws
-cloudsentrix list-principals --file azure_ad.json --cloud azure-ad
+cloudsentrix watch --path sample_data/sample_gcp_iam.json
+cloudsentrix watch --path sample_data/sample_azure_rbac.json --cloud azure --interval 5
 ```
 
 ### `rules` — List All Detection Rules
 
 ```bash
 cloudsentrix rules
-# Shows GCP (5) + AWS (7) + Azure RBAC (5) + Azure AD (6) = 23 rules
+# Shows GCP (5) + AWS (7) + Azure RBAC (5) + Azure AD (6) = 23 total rules
 ```
 
 ---
@@ -242,53 +284,40 @@ cloudsentrix rules
 ## Slack / Teams Alerts
 
 ```bash
-# Slack setup
+# Slack
 export CLOUDSENTRIX_SLACK_WEBHOOK="https://hooks.slack.com/services/YOUR/WEBHOOK"
-cloudsentrix scan --file my.json --notify slack
-cloudsentrix scan --file aws.json --cloud aws --notify slack --webhook https://...
+cloudsentrix scan --file sample_data/sample_gcp_iam.json --notify slack
+cloudsentrix scan --file sample_data/sample_aws_iam.json --cloud aws --notify slack
 
-# Teams setup
+# Teams
 export CLOUDSENTRIX_TEAMS_WEBHOOK="https://your-org.webhook.office.com/..."
-cloudsentrix scan --file my.json --notify teams
+cloudsentrix scan --file sample_data/sample_gcp_iam.json --notify teams
+
+# Direct webhook URL (no env var needed)
+cloudsentrix scan --file sample_data/sample_gcp_iam.json --notify slack --webhook https://hooks.slack.com/services/YOUR/WEBHOOK
 ```
 
-**Slack webhook setup:**
-1. Go to **https://api.slack.com/apps** → Create App → Incoming Webhooks
-2. Add webhook → select channel → copy URL
-3. Set env var → scan with `--notify slack`
+**Slack setup:** Go to https://api.slack.com/apps → Create App → Incoming Webhooks → Add webhook → Copy URL → set env var.
 
 ---
 
 ## CI/CD Integration
 
-Ready-made templates in the `ci-templates/` folder:
+Ready-made templates in the `ci-templates/` folder.
 
-### GitHub Actions (GCP)
+### GitHub Actions
 
 ```yaml
-# .github/workflows/cloudsentrix-gcp.yml
+# .github/workflows/cloudsentrix.yml
 - name: Install CloudSentrix
   run: pip install cloudsentrix
 
 - name: Scan GCP IAM
   run: cloudsentrix scan --file gcp_iam.json --severity high
-  # Exit code 1 on CRITICAL findings → pipeline fails automatically
-```
-
-### GitHub Actions (Multi-Cloud)
-
-```yaml
-- name: Multi-Cloud Scan
-  run: |
-    cloudsentrix scan --file gcp.json --cloud gcp
-    cloudsentrix scan --file aws.json --cloud aws
-    cloudsentrix scan --file azure.json --cloud azure
+  # Exit code 1 on CRITICAL findings — pipeline fails automatically
 
 - name: Generate Dashboard
-  run: |
-    cloudsentrix dashboard \
-      --gcp gcp.json --aws aws.json --azure azure.json \
-      --output dashboard.html
+  run: cloudsentrix dashboard --gcp gcp.json --aws aws.json --azure azure.json --output dashboard.html
 
 - name: Upload Dashboard
   uses: actions/upload-artifact@v4
@@ -319,8 +348,6 @@ stage('Security Scan') {
 }
 ```
 
-**Full templates:** `ci-templates/` folder in the repo.
-
 ---
 
 ## AWS LocalStack Testing (No Real AWS Account)
@@ -328,18 +355,24 @@ stage('Security Scan') {
 ```bash
 pip install localstack awscli-local
 localstack start
-
 awslocal iam create-user --user-name test-admin
-awslocal iam attach-user-policy \
-  --user-name test-admin \
-  --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
-
+awslocal iam attach-user-policy --user-name test-admin --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
 cloudsentrix live-scan --cloud aws --endpoint http://localhost:4566
 ```
 
 ---
 
-## Exit Codes (Use in CI/CD)
+## Gemini AI Summary (Optional)
+
+```bash
+# Get free API key from https://aistudio.google.com/app/apikey
+export GEMINI_API_KEY="your_api_key_here"
+cloudsentrix report --file sample_data/sample_gcp_iam.json --output report.pdf
+```
+
+---
+
+## Exit Codes
 
 | Code | Meaning |
 |------|---------|
@@ -351,7 +384,7 @@ cloudsentrix live-scan --cloud aws --endpoint http://localhost:4566
 
 ## Detection Rules
 
-### GCP (5 rules)
+### ☁️ GCP (5 rules)
 
 | Rule | Title | Severity | MITRE |
 |------|-------|----------|-------|
@@ -359,31 +392,31 @@ cloudsentrix live-scan --cloud aws --endpoint http://localhost:4566
 | GCP-002 | Service Account Token Creator | CRITICAL | T1098.001 |
 | GCP-003 | Service Account Key Admin | CRITICAL | T1098.001 |
 | GCP-004 | IAM Policy Administrator | CRITICAL | T1098.003 |
-| GCP-005 | Service Account Impersonation | HIGH | T1548.005 |
+| GCP-005 | Service Account Impersonation via Resource Attach | HIGH | T1548.005 |
 
-### AWS (7 rules)
+### 🟡 AWS (7 rules)
 
 | Rule | Title | Severity | MITRE |
 |------|-------|----------|-------|
-| AWS-001 | Administrator Access | CRITICAL | T1078.004 |
-| AWS-002 | IAM PassRole Escalation | CRITICAL | T1098.003 |
-| AWS-003 | IAM Policy Manipulation | CRITICAL | T1098.003 |
-| AWS-004 | Publicly Assumable Role | CRITICAL | T1078.004 |
-| AWS-005 | Access Key Creation Backdoor | CRITICAL | T1098.001 |
+| AWS-001 | Administrator Access — Full AWS Control | CRITICAL | T1078.004 |
+| AWS-002 | IAM PassRole — Privilege Escalation via Service | CRITICAL | T1098.003 |
+| AWS-003 | IAM Policy Manipulation — Self-Escalation Path | CRITICAL | T1098.003 |
+| AWS-004 | Publicly Assumable Role — Trust Policy Allows Anyone | CRITICAL | T1078.004 |
+| AWS-005 | Access Key Creation — Long-Lived Credential Backdoor | CRITICAL | T1098.001 |
 | AWS-006 | Backdoor IAM User Creation | CRITICAL | T1136.003 |
-| AWS-007 | IAMFullAccess | CRITICAL | T1098.003 |
+| AWS-007 | IAMFullAccess — Complete IAM Control | CRITICAL | T1098.003 |
 
-### Azure RBAC (5 rules)
+### 🔷 Azure RBAC (5 rules)
 
 | Rule | Title | Severity | MITRE |
 |------|-------|----------|-------|
 | AZ-001 | Owner / Contributor at Broad Scope | CRITICAL | T1078.004 |
-| AZ-002 | Service Principal High-Privilege Role | CRITICAL | T1098.001 |
+| AZ-002 | Service Principal with High-Privilege Role | CRITICAL | T1098.001 |
 | AZ-003 | Guest User with Elevated Role | HIGH | T1078.006 |
 | AZ-004 | Over-permissive Role Scope | HIGH | T1548.005 |
-| AZ-005 | Custom Role Dangerous Permissions | HIGH | T1098.003 |
+| AZ-005 | Custom Role with Dangerous Permissions | HIGH | T1098.003 |
 
-### Azure AD / Entra ID (6 rules)
+### 🔷 Azure AD / Entra ID (6 rules)
 
 | Rule | Title | Severity | MITRE |
 |------|-------|----------|-------|
@@ -392,7 +425,18 @@ cloudsentrix live-scan --cloud aws --endpoint http://localhost:4566
 | AZAD-003 | Multi-Tenant App with Broad Permissions | CRITICAL | T1199 |
 | AZAD-004 | Expired App Credentials | MEDIUM | T1552.001 |
 | AZAD-005 | App Credential With No Expiry | HIGH | T1528 |
-| AZAD-006 | Service Principal High-Privilege App Roles | CRITICAL | T1098.003 |
+| AZAD-006 | Service Principal with High-Privilege App Roles | CRITICAL | T1098.003 |
+
+---
+
+## Running Tests
+
+```bash
+pip install -e ".[dev]"
+pytest tests/ -v
+```
+
+Expected: `144 passed`
 
 ---
 
@@ -407,31 +451,31 @@ cloudsentrix/
 │   ├── detection.py              # GCP detection (5 rules)
 │   ├── risk_score.py             # 0-100 scoring engine
 │   ├── blast_radius.py           # GCP blast radius calculator
-│   ├── watch_handler.py          # File system watcher
+│   ├── watch_handler.py          # File watcher
 │   ├── live_scanner.py           # Live GCP scanner
-│   ├── pdf_report.py             # Single-cloud PDF generator
+│   ├── pdf_report.py             # Single-cloud PDF
 │   ├── ai_summary.py             # Gemini AI integration
 │   ├── aws_parser.py             # AWS IAM parser
 │   ├── aws_graph.py              # AWS graph engine
 │   ├── aws_detection.py          # AWS detection (7 rules)
-│   ├── aws_live_scanner.py       # Live AWS scanner via boto3
+│   ├── aws_live_scanner.py       # Live AWS scanner
 │   ├── azure_parser.py           # Azure RBAC parser
 │   ├── azure_detection.py        # Azure RBAC detection (5 rules)
 │   ├── azure_risk_score.py       # Azure scoring engine
 │   ├── azure_blast_radius.py     # Azure blast radius
-│   ├── azure_exporter.py         # Azure JSON/CSV/SARIF/HTML
-│   ├── azure_live_scanner.py     # Live Azure scanner via az CLI
+│   ├── azure_exporter.py         # Azure JSON/CSV/SARIF/HTML exporter
+│   ├── azure_live_scanner.py     # Live Azure scanner
 │   ├── azure_ad_parser.py        # Azure AD / Entra ID parser
 │   ├── azure_ad_detection.py     # Azure AD detection (6 rules)
 │   ├── multi_dashboard.py        # Multi-cloud animated HTML dashboard
 │   ├── multi_pdf_report.py       # Multi-cloud PDF report
 │   └── notifier.py               # Slack / Teams webhook alerts
 ├── ci-templates/
-│   ├── github-actions-gcp.yml    # GitHub Actions — GCP template
-│   ├── github-actions-aws.yml    # GitHub Actions — AWS template
-│   ├── github-actions-multi-cloud.yml  # GitHub Actions — all clouds
-│   ├── gitlab-ci.yml             # GitLab CI template
-│   └── jenkins-pipeline.groovy   # Jenkins pipeline template
+│   ├── github-actions-gcp.yml
+│   ├── github-actions-aws.yml
+│   ├── github-actions-multi-cloud.yml
+│   ├── gitlab-ci.yml
+│   └── jenkins-pipeline.groovy
 ├── tests/                        # 144 pytest tests
 ├── sample_data/
 │   ├── sample_gcp_iam.json
@@ -451,9 +495,9 @@ cloudsentrix/
 
 | Feature | Status |
 |---------|--------|
-| GCP IAM scanning — 5 rules, blast radius, live scan | ✅ Shipped |
-| AWS IAM scanning — 7 rules, PassRole, live scan, LocalStack | ✅ Shipped |
-| Azure RBAC scanning — 5 rules, blast radius, live scan | ✅ Shipped |
+| GCP IAM — 5 rules, blast radius, remediation, live scan | ✅ Shipped |
+| AWS IAM — 7 rules, PassRole, AssumeRole, live scan, LocalStack | ✅ Shipped |
+| Azure RBAC — 5 rules, blast radius, live scan | ✅ Shipped |
 | Azure AD / Entra ID — 6 rules, OAuth risks, orphaned apps | ✅ Shipped |
 | Multi-Cloud Animated HTML Dashboard | ✅ Shipped |
 | Multi-Cloud PDF Report | ✅ Shipped |
@@ -466,6 +510,8 @@ cloudsentrix/
 ## License
 
 MIT — free to use, modify, and distribute.
+
+---
 
 ## Author
 
