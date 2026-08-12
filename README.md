@@ -1,3 +1,16 @@
+<div align="center">
+
+<img src="https://cloudsentrix.netlify.app/og-image.png" alt="CloudSentrix" width="100%"/>
+
+<br/>
+
+[![Website](https://img.shields.io/badge/Website-cloudsentrix.netlify.app-black?style=for-the-badge&logo=netlify)](https://cloudsentrix.netlify.app/)
+[![CI](https://img.shields.io/github/actions/workflow/status/Talha-Imran-cloud/cloudsentrix/ci.yml?style=for-the-badge&label=CI&logo=github)](https://github.com/Talha-Imran-cloud/cloudsentrix/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/cloudsentrix?style=for-the-badge&logo=pypi&logoColor=white)](https://pypi.org/project/cloudsentrix/)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-black?style=for-the-badge&logo=python)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-MIT-black?style=for-the-badge)](LICENSE)
+[![Tests](https://img.shields.io/badge/Tests-144%20passed-black?style=for-the-badge&logo=pytest)](tests/)
+
 ```
    _____ _                 _  _____            _      _      
   / ____| |               | |/ ____|          | |    (_)     
@@ -5,43 +18,46 @@
  | |    | |/ _ \| | | |/ _` |\___ \ / _ \ '_ \| __| | \ \/ /
  | |____| | (_) | |_| | (_| |____) |  __/ | | | |_| |  >  < 
   \_____|_|\___/ \__,_|\__,_|_____/ \___|_| |_|\__|_|_/_/\_\
+                                                    v2.0.0
 ```
 
-**Multi-Cloud IAM Privilege-Escalation Attack-Path Analyzer**
+**Multi-Cloud IAM Attack-Path Analyzer**
 
-CloudSentrix is a free, open-source CLI security tool that scans **GCP, AWS, Azure RBAC, and Azure AD** for privilege-escalation risks — with interactive dashboards, PDF reports, Slack/Teams alerts, and CI/CD integration. A free alternative to Wiz and Orca.
+Open-source CLI that scans GCP, AWS, Azure, Kubernetes, and Terraform for privilege-escalation risks — 40 detection rules, blast radius analysis, MITRE ATT&CK mapping, cross-cloud attack chains, and CI/CD integration. **The free alternative to Wiz and Orca.**
 
-[![CI](https://github.com/Talha-Imran-cloud/cloudsentrix/actions/workflows/ci.yml/badge.svg)](https://github.com/Talha-Imran-cloud/cloudsentrix/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/cloudsentrix)](https://pypi.org/project/cloudsentrix/)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-144%20passed-brightgreen)](tests/)
+[**🌐 Website**](https://cloudsentrix.netlify.app/) · [**📦 PyPI**](https://pypi.org/project/cloudsentrix/) · [**📖 Docs**](https://github.com/Talha-Imran-cloud/cloudsentrix#commands) · [**🐛 Issues**](https://github.com/Talha-Imran-cloud/cloudsentrix/issues)
+
+</div>
 
 ---
 
 ## What It Does
 
-| Cloud | Rules | Live Scan | Dashboard | PDF |
-|-------|-------|-----------|-----------|-----|
-| ☁️ GCP | 5 rules | ✅ gcloud CLI | ✅ | ✅ |
-| 🟡 AWS | 7 rules | ✅ boto3 + LocalStack | ✅ | ✅ |
-| 🔷 Azure RBAC | 5 rules | ✅ az CLI | ✅ | ✅ |
-| 🔷 Azure AD / Entra ID | 6 rules | ✅ az CLI | ✅ | ✅ |
-| 🌐 Multi-Cloud | 23 rules total | — | ✅ Animated | ✅ Combined |
+| Target | Rules | Live Scan | Blast Radius | Dashboard | PDF |
+|--------|-------|-----------|--------------|-----------|-----|
+| ☁️ GCP IAM | 5 | ✅ gcloud | ✅ | ✅ | ✅ |
+| 🟡 AWS IAM | 7 | ✅ boto3 + LocalStack | ✅ | ✅ | ✅ |
+| 🔷 Azure RBAC | 5 | ✅ az CLI | ✅ | ✅ | ✅ |
+| 🔷 Azure AD / Entra ID | 6 | ✅ az CLI | — | ✅ | ✅ |
+| 🏗️ Terraform IaC + State | 11 | — | — | — | — |
+| ☸️ Kubernetes RBAC | 6 | — | — | — | — |
+| 🌐 Cross-Cloud Chains | — | — | — | — | ✅ JSON |
+| **Total** | **40 rules** | | | | |
 
 ---
 
 ## Key Features
 
-- **23 detection rules** — GCP, AWS, Azure RBAC, Azure AD — all MITRE ATT&CK mapped
-- **Blast radius** — if one account is compromised, how much can an attacker reach?
-- **Remediation** — exact `gcloud` / `aws` / `az` CLI fix commands per finding
-- **Multi-cloud HTML dashboard** — animated, all clouds side by side in one file
+- **40 detection rules** — GCP, AWS, Azure RBAC, Azure AD, Terraform, K8s — all MITRE ATT&CK mapped
+- **Industry-first cross-cloud attack chain detection** — AWS→Azure→GCP multi-hop paths
+- **Blast radius** — GCP, AWS, Azure all supported
+- **Terraform state file scanning** — detect leaked secrets in `.tfstate` files
+- **Kubernetes RBAC scanning** — cluster-admin abuse, wildcard permissions, pod exec
+- **Multi-cloud HTML dashboard** — animated, website-theme, all clouds side by side
 - **Multi-cloud PDF report** — cover page, executive summary, per-cloud findings
-- **Slack / Teams alerts** — send findings to your team after every scan
+- **Slack / Teams alerts** — send findings after every scan
 - **CI/CD templates** — GitHub Actions, GitLab CI, Jenkins — ready to use
 - **SARIF export** — upload directly to GitHub Security tab
-- **Watch mode** — auto-rescan when IAM file changes
 - **Gemini AI summaries** — plain-language executive reports
 
 ---
@@ -57,7 +73,7 @@ pip install cloudsentrix
 pip install cloudsentrix --break-system-packages
 ```
 
-**Virtual environment (recommended):**
+**Virtual environment:**
 ```bash
 python3 -m venv venv && source venv/bin/activate && pip install cloudsentrix
 ```
@@ -77,6 +93,37 @@ cd cloudsentrix && pip install -e .
 
 ```bash
 cloudsentrix --version
+# CloudSentrix 2.0.0
+```
+
+---
+
+## Quick Start
+
+```bash
+# GCP
+cloudsentrix scan --file sample_data/sample_gcp_iam.json
+
+# AWS
+cloudsentrix scan --file sample_data/sample_aws_iam.json --cloud aws
+
+# Azure
+cloudsentrix scan --file sample_data/sample_azure_rbac.json --cloud azure
+
+# Multi-cloud dashboard
+cloudsentrix dashboard --gcp sample_data/sample_gcp_iam.json --aws sample_data/sample_aws_iam.json --azure sample_data/sample_azure_rbac.json --output dashboard.html
+
+# Cross-cloud attack chains
+cloudsentrix cross-cloud --aws sample_data/sample_aws_iam.json --azure sample_data/sample_azure_rbac.json
+
+# Kubernetes RBAC
+cloudsentrix k8s --path sample_data/sample_k8s_rbac.json
+
+# Terraform scan
+cloudsentrix terraform --path sample_data/sample_terraform/main.tf
+
+# Terraform state secrets
+cloudsentrix terraform --path sample_data/sample_terraform.tfstate
 ```
 
 ---
@@ -95,74 +142,64 @@ az role assignment list --all --output json > azure_rbac.json
 
 # Azure AD / Entra ID
 az ad app list --all --output json > azure_ad.json
-```
 
-**Sample files included for testing:**
-- `sample_data/sample_gcp_iam.json`
-- `sample_data/sample_aws_iam.json`
-- `sample_data/sample_azure_rbac.json`
-- `sample_data/sample_azure_ad.json`
+# Kubernetes
+kubectl get clusterroles,clusterrolebindings,roles,rolebindings -o json > k8s_rbac.json
+```
 
 ---
 
 ## Commands
 
-> **Windows note:** Use single-line commands. Multi-line `\` syntax does not work in PowerShell.
+> **Windows:** Use single-line commands. Multi-line `\` syntax does not work in PowerShell.
 
 ### `scan` — Full pipeline scan
-
 ```bash
-# GCP (default)
 cloudsentrix scan --file sample_data/sample_gcp_iam.json
-
-# AWS
 cloudsentrix scan --file sample_data/sample_aws_iam.json --cloud aws
-
-# Azure RBAC
 cloudsentrix scan --file sample_data/sample_azure_rbac.json --cloud azure
-
-# Azure AD / Entra ID
 cloudsentrix scan --file sample_data/sample_azure_ad.json --cloud azure-ad
-
-# Filter by severity
-cloudsentrix scan --file sample_data/sample_aws_iam.json --cloud aws --severity critical
-
-# Scan + Slack alert
+cloudsentrix scan --file sample_data/sample_gcp_iam.json --severity critical
 cloudsentrix scan --file sample_data/sample_gcp_iam.json --notify slack
 ```
 
-### `dashboard` — Multi-Cloud HTML Dashboard
-
+### `cross-cloud` — Cross-Cloud Attack Chain Detection ⚡ Industry-First
 ```bash
-# All three clouds (single line — works on all platforms)
-cloudsentrix dashboard --gcp sample_data/sample_gcp_iam.json --aws sample_data/sample_aws_iam.json --azure sample_data/sample_azure_rbac.json --output multi_cloud_dashboard.html
-
-# Two clouds only
-cloudsentrix dashboard --gcp sample_data/sample_gcp_iam.json --aws sample_data/sample_aws_iam.json --output dashboard.html
-
-# Open the dashboard (Windows)
-start multi_cloud_dashboard.html
-
-# Open the dashboard (Linux / macOS)
-xdg-open multi_cloud_dashboard.html
+cloudsentrix cross-cloud --aws sample_data/sample_aws_iam.json --azure sample_data/sample_azure_rbac.json
+cloudsentrix cross-cloud --gcp sample_data/sample_gcp_iam.json --aws sample_data/sample_aws_iam.json --azure sample_data/sample_azure_rbac.json
+cloudsentrix cross-cloud --aws sample_data/sample_aws_iam.json --azure sample_data/sample_azure_rbac.json --output chains.json
 ```
 
-Dashboard features: animated score counters, bar charts, severity breakdown, all findings in one filterable table, floating particles, scroll animations.
+### `terraform` — Terraform IaC + State Scanning
+```bash
+# Scan .tf files
+cloudsentrix terraform --path sample_data/sample_terraform/main.tf
+cloudsentrix terraform --path /path/to/terraform/
+
+# Scan .tfstate for leaked secrets
+cloudsentrix terraform --path sample_data/sample_terraform.tfstate
+cloudsentrix terraform --path terraform.tfstate --output secrets.json
+```
+
+### `k8s` — Kubernetes RBAC Scanning
+```bash
+cloudsentrix k8s --path sample_data/sample_k8s_rbac.json
+cloudsentrix k8s --path /path/to/k8s/manifests/
+cloudsentrix k8s --path k8s_rbac.json --output k8s_findings.json
+```
+
+### `dashboard` — Multi-Cloud HTML Dashboard
+```bash
+cloudsentrix dashboard --gcp sample_data/sample_gcp_iam.json --aws sample_data/sample_aws_iam.json --azure sample_data/sample_azure_rbac.json --output dashboard.html
+cloudsentrix dashboard --gcp sample_data/sample_gcp_iam.json --aws sample_data/sample_aws_iam.json --output dashboard.html
+```
 
 ### `report-multi` — Multi-Cloud PDF Report
-
 ```bash
-# All three clouds
 cloudsentrix report-multi --gcp sample_data/sample_gcp_iam.json --aws sample_data/sample_aws_iam.json --azure sample_data/sample_azure_rbac.json --output multi_cloud_report.pdf
-
-# Two clouds
-cloudsentrix report-multi --gcp sample_data/sample_gcp_iam.json --aws sample_data/sample_aws_iam.json --output report.pdf
 ```
 
-PDF includes: cover page, executive summary, per-cloud findings table, blast radius top 5, MITRE mapping, timestamp.
-
 ### `report` — Single-Cloud PDF
-
 ```bash
 cloudsentrix report --file sample_data/sample_gcp_iam.json --output report.pdf --no-ai
 cloudsentrix report --file sample_data/sample_aws_iam.json --cloud aws --output aws_report.pdf --no-ai
@@ -170,55 +207,35 @@ cloudsentrix report --file sample_data/sample_azure_rbac.json --cloud azure --ou
 ```
 
 ### `live-scan` — Scan Live Cloud Account
-
 ```bash
-# GCP (requires gcloud CLI)
+# GCP
 cloudsentrix live-scan --project my-gcp-project-id
-cloudsentrix live-scan --project my-gcp-project-id --save fetched_policy.json
 
-# AWS (requires boto3: pip install boto3)
+# AWS (requires: pip install boto3)
 cloudsentrix live-scan --cloud aws
 cloudsentrix live-scan --cloud aws --profile my-profile --region us-west-2
-cloudsentrix live-scan --cloud aws --save aws_policy.json
-
-# AWS — LocalStack (no real AWS account needed)
 cloudsentrix live-scan --cloud aws --endpoint http://localhost:4566
 
-# Azure (requires az login)
-cloudsentrix live-scan --cloud azure
-cloudsentrix live-scan --cloud azure --subscription my-subscription-id --save azure_policy.json
+# Azure
+cloudsentrix live-scan --cloud azure --subscription my-subscription-id
 ```
 
 ### `export` — Export Results
-
 ```bash
-# HTML interactive dashboard
-cloudsentrix export --file sample_data/sample_gcp_iam.json --output gcp_dashboard.html
-cloudsentrix export --file sample_data/sample_aws_iam.json --cloud aws --output aws_dashboard.html
-cloudsentrix export --file sample_data/sample_azure_rbac.json --cloud azure --output azure_dashboard.html
-cloudsentrix export --file sample_data/sample_azure_ad.json --cloud azure-ad --output azad_dashboard.html
-
-# JSON
-cloudsentrix export --file sample_data/sample_gcp_iam.json --output report.json
-
-# CSV
-cloudsentrix export --file sample_data/sample_aws_iam.json --cloud aws --output report.csv
-
-# SARIF (GitHub Code Scanning)
+cloudsentrix export --file sample_data/sample_gcp_iam.json --output dashboard.html
+cloudsentrix export --file sample_data/sample_aws_iam.json --cloud aws --output report.json
+cloudsentrix export --file sample_data/sample_gcp_iam.json --output report.csv
 cloudsentrix export --file sample_data/sample_gcp_iam.json --output results.sarif
 ```
 
 ### `score` — Security Score
-
 ```bash
 cloudsentrix score --file sample_data/sample_gcp_iam.json
-cloudsentrix score --file sample_data/sample_aws_iam.json --cloud aws
-cloudsentrix score --file sample_data/sample_azure_rbac.json --cloud azure --json
+cloudsentrix score --file sample_data/sample_aws_iam.json --cloud aws --json
 cloudsentrix score --file sample_data/sample_gcp_iam.json --min-score 70
 ```
 
 ### `validate` — Validate File Format
-
 ```bash
 cloudsentrix validate --file sample_data/sample_gcp_iam.json
 cloudsentrix validate --file sample_data/sample_aws_iam.json --cloud aws
@@ -226,57 +243,16 @@ cloudsentrix validate --file sample_data/sample_azure_rbac.json --cloud azure
 cloudsentrix validate --file sample_data/sample_azure_ad.json --cloud azure-ad
 ```
 
-### `list-principals` — List All Principals
-
-```bash
-cloudsentrix list-principals --file sample_data/sample_gcp_iam.json
-cloudsentrix list-principals --file sample_data/sample_aws_iam.json --cloud aws
-cloudsentrix list-principals --file sample_data/sample_azure_rbac.json --cloud azure
-```
-
-### `blast-radius` — Blast Radius (GCP)
-
+### Other Commands
 ```bash
 cloudsentrix blast-radius --file sample_data/sample_gcp_iam.json --principal admin@company.com
-```
-
-### `principal-path` — Escalation Path (GCP)
-
-```bash
 cloudsentrix principal-path --file sample_data/sample_gcp_iam.json --source intern@company.com --target sa@my-project.iam.gserviceaccount.com
-```
-
-### `mitre-map` — MITRE ATT&CK Mapping
-
-```bash
 cloudsentrix mitre-map --file sample_data/sample_gcp_iam.json
-```
-
-### `remediate` — Generate Fix Commands (GCP)
-
-```bash
-cloudsentrix remediate --file sample_data/sample_gcp_iam.json
 cloudsentrix remediate --file sample_data/sample_gcp_iam.json --severity critical
-```
-
-### `compare` — Compare Two Exports
-
-```bash
 cloudsentrix compare --old january.json --new february.json
-```
-
-### `watch` — Auto-Rescan on File Change
-
-```bash
 cloudsentrix watch --path sample_data/sample_gcp_iam.json
-cloudsentrix watch --path sample_data/sample_azure_rbac.json --cloud azure --interval 5
-```
-
-### `rules` — List All Detection Rules
-
-```bash
+cloudsentrix list-principals --file sample_data/sample_aws_iam.json --cloud aws
 cloudsentrix rules
-# Shows GCP (5) + AWS (7) + Azure RBAC (5) + Azure AD (6) = 23 total rules
 ```
 
 ---
@@ -287,47 +263,39 @@ cloudsentrix rules
 # Slack
 export CLOUDSENTRIX_SLACK_WEBHOOK="https://hooks.slack.com/services/YOUR/WEBHOOK"
 cloudsentrix scan --file sample_data/sample_gcp_iam.json --notify slack
-cloudsentrix scan --file sample_data/sample_aws_iam.json --cloud aws --notify slack
 
 # Teams
 export CLOUDSENTRIX_TEAMS_WEBHOOK="https://your-org.webhook.office.com/..."
 cloudsentrix scan --file sample_data/sample_gcp_iam.json --notify teams
 
-# Direct webhook URL (no env var needed)
+# Direct URL
 cloudsentrix scan --file sample_data/sample_gcp_iam.json --notify slack --webhook https://hooks.slack.com/services/YOUR/WEBHOOK
 ```
-
-**Slack setup:** Go to https://api.slack.com/apps → Create App → Incoming Webhooks → Add webhook → Copy URL → set env var.
 
 ---
 
 ## CI/CD Integration
 
-Ready-made templates in the `ci-templates/` folder.
+Ready-made templates in `ci-templates/` folder.
 
 ### GitHub Actions
-
 ```yaml
-# .github/workflows/cloudsentrix.yml
 - name: Install CloudSentrix
   run: pip install cloudsentrix
 
 - name: Scan GCP IAM
   run: cloudsentrix scan --file gcp_iam.json --severity high
-  # Exit code 1 on CRITICAL findings — pipeline fails automatically
 
-- name: Generate Dashboard
-  run: cloudsentrix dashboard --gcp gcp.json --aws aws.json --azure azure.json --output dashboard.html
+- name: Generate SARIF
+  run: cloudsentrix export --file gcp_iam.json --output results.sarif
 
-- name: Upload Dashboard
-  uses: actions/upload-artifact@v4
+- name: Upload to GitHub Security
+  uses: github/codeql-action/upload-sarif@v3
   with:
-    name: security-dashboard
-    path: dashboard.html
+    sarif_file: results.sarif
 ```
 
 ### GitLab CI
-
 ```yaml
 cloudsentrix-scan:
   image: python:3.11
@@ -338,7 +306,6 @@ cloudsentrix-scan:
 ```
 
 ### Jenkins
-
 ```groovy
 stage('Security Scan') {
     steps {
@@ -350,7 +317,7 @@ stage('Security Scan') {
 
 ---
 
-## AWS LocalStack Testing (No Real AWS Account)
+## AWS LocalStack Testing
 
 ```bash
 pip install localstack awscli-local
@@ -362,13 +329,14 @@ cloudsentrix live-scan --cloud aws --endpoint http://localhost:4566
 
 ---
 
-## Gemini AI Summary (Optional)
+## Gemini AI Summary
 
 ```bash
-# Get free API key from https://aistudio.google.com/app/apikey
 export GEMINI_API_KEY="your_api_key_here"
 cloudsentrix report --file sample_data/sample_gcp_iam.json --output report.pdf
 ```
+
+Get free API key from [Google AI Studio](https://aistudio.google.com/app/apikey)
 
 ---
 
@@ -378,14 +346,13 @@ cloudsentrix report --file sample_data/sample_gcp_iam.json --output report.pdf
 |------|---------|
 | `0` | No CRITICAL findings |
 | `1` | CRITICAL findings — fail the pipeline |
-| `2` | Command error (bad file, wrong format) |
+| `2` | Command error |
 
 ---
 
 ## Detection Rules
 
 ### ☁️ GCP (5 rules)
-
 | Rule | Title | Severity | MITRE |
 |------|-------|----------|-------|
 | GCP-001 | Publicly Accessible Role Binding | CRITICAL | T1078.004 |
@@ -395,7 +362,6 @@ cloudsentrix report --file sample_data/sample_gcp_iam.json --output report.pdf
 | GCP-005 | Service Account Impersonation via Resource Attach | HIGH | T1548.005 |
 
 ### 🟡 AWS (7 rules)
-
 | Rule | Title | Severity | MITRE |
 |------|-------|----------|-------|
 | AWS-001 | Administrator Access — Full AWS Control | CRITICAL | T1078.004 |
@@ -407,7 +373,6 @@ cloudsentrix report --file sample_data/sample_gcp_iam.json --output report.pdf
 | AWS-007 | IAMFullAccess — Complete IAM Control | CRITICAL | T1098.003 |
 
 ### 🔷 Azure RBAC (5 rules)
-
 | Rule | Title | Severity | MITRE |
 |------|-------|----------|-------|
 | AZ-001 | Owner / Contributor at Broad Scope | CRITICAL | T1078.004 |
@@ -417,7 +382,6 @@ cloudsentrix report --file sample_data/sample_gcp_iam.json --output report.pdf
 | AZ-005 | Custom Role with Dangerous Permissions | HIGH | T1098.003 |
 
 ### 🔷 Azure AD / Entra ID (6 rules)
-
 | Rule | Title | Severity | MITRE |
 |------|-------|----------|-------|
 | AZAD-001 | Dangerous OAuth Permission | CRITICAL | T1528 |
@@ -427,16 +391,30 @@ cloudsentrix report --file sample_data/sample_gcp_iam.json --output report.pdf
 | AZAD-005 | App Credential With No Expiry | HIGH | T1528 |
 | AZAD-006 | Service Principal with High-Privilege App Roles | CRITICAL | T1098.003 |
 
----
+### 🏗️ Terraform IaC (10 rules) + State (1 rule)
+| Rule | Title | Severity | MITRE |
+|------|-------|----------|-------|
+| TF-001 | AWS IAM Wildcard Policy (Action:* Resource:*) | CRITICAL | T1078.004 |
+| TF-002 | AWS IAM Role Public Trust Policy (Principal:*) | CRITICAL | T1078.004 |
+| TF-003 | AWS AdministratorAccess Policy Attached | CRITICAL | T1078.004 |
+| TF-004 | GCP Public IAM Binding (allUsers) | CRITICAL | T1078.004 |
+| TF-005 | GCP Owner/Editor Role Binding | HIGH | T1098.003 |
+| TF-006 | Azure Owner Role Assignment | CRITICAL | T1078.004 |
+| TF-007 | Hardcoded Secrets / Access Keys | CRITICAL | T1552.001 |
+| TF-008 | AWS IAM Policy Uses NotAction | HIGH | T1078.004 |
+| TF-009 | AWS IAM Inline Policy on User | MEDIUM | T1078.004 |
+| TF-010 | Sensitive Policy Missing MFA Condition | MEDIUM | T1078.004 |
+| TFS-001 | Secret Leaked in Terraform State File | CRITICAL | T1552.001 |
 
-## Running Tests
-
-```bash
-pip install -e ".[dev]"
-pytest tests/ -v
-```
-
-Expected: `144 passed`
+### ☸️ Kubernetes RBAC (6 rules)
+| Rule | Title | Severity | MITRE |
+|------|-------|----------|-------|
+| K8S-001 | ClusterRoleBinding to cluster-admin | CRITICAL | T1078.001 |
+| K8S-002 | Wildcard Permissions in Role | CRITICAL | T1078.001 |
+| K8S-003 | Role Can Read Kubernetes Secrets | HIGH | T1552.007 |
+| K8S-004 | Default ServiceAccount Bound to Privileged Role | HIGH | T1078.001 |
+| K8S-005 | Anonymous / Unauthenticated Access Granted | CRITICAL | T1078.001 |
+| K8S-006 | Role Allows Pod Exec/Attach | HIGH | T1609 |
 
 ---
 
@@ -445,12 +423,12 @@ Expected: `144 passed`
 ```
 cloudsentrix/
 ├── src/
-│   ├── cli.py                    # CLI entry point (15 commands)
+│   ├── cli.py                    # CLI entry point (19 commands)
 │   ├── parser.py                 # GCP IAM parser
 │   ├── graph.py                  # GCP graph engine
 │   ├── detection.py              # GCP detection (5 rules)
 │   ├── risk_score.py             # 0-100 scoring engine
-│   ├── blast_radius.py           # GCP blast radius calculator
+│   ├── blast_radius.py           # GCP blast radius
 │   ├── watch_handler.py          # File watcher
 │   ├── live_scanner.py           # Live GCP scanner
 │   ├── pdf_report.py             # Single-cloud PDF
@@ -458,15 +436,19 @@ cloudsentrix/
 │   ├── aws_parser.py             # AWS IAM parser
 │   ├── aws_graph.py              # AWS graph engine
 │   ├── aws_detection.py          # AWS detection (7 rules)
+│   ├── aws_blast_radius.py       # AWS blast radius
 │   ├── aws_live_scanner.py       # Live AWS scanner
 │   ├── azure_parser.py           # Azure RBAC parser
 │   ├── azure_detection.py        # Azure RBAC detection (5 rules)
 │   ├── azure_risk_score.py       # Azure scoring engine
 │   ├── azure_blast_radius.py     # Azure blast radius
-│   ├── azure_exporter.py         # Azure JSON/CSV/SARIF/HTML exporter
+│   ├── azure_exporter.py         # Azure JSON/CSV/SARIF/HTML
 │   ├── azure_live_scanner.py     # Live Azure scanner
-│   ├── azure_ad_parser.py        # Azure AD / Entra ID parser
+│   ├── azure_ad_parser.py        # Azure AD parser
 │   ├── azure_ad_detection.py     # Azure AD detection (6 rules)
+│   ├── terraform_scanner.py      # Terraform IaC + State scanner (11 rules)
+│   ├── k8s_scanner.py            # Kubernetes RBAC scanner (6 rules)
+│   ├── cross_cloud_detector.py   # Cross-cloud attack chain detection
 │   ├── multi_dashboard.py        # Multi-cloud animated HTML dashboard
 │   ├── multi_pdf_report.py       # Multi-cloud PDF report
 │   └── notifier.py               # Slack / Teams webhook alerts
@@ -482,7 +464,11 @@ cloudsentrix/
 │   ├── demo_enterprise_iam.json
 │   ├── sample_aws_iam.json
 │   ├── sample_azure_rbac.json
-│   └── sample_azure_ad.json
+│   ├── sample_azure_ad.json
+│   ├── sample_k8s_rbac.json
+│   ├── sample_terraform.tfstate
+│   └── sample_terraform/
+│       └── main.tf
 ├── .github/workflows/ci.yml
 ├── .github/workflows/publish.yml
 ├── pyproject.toml
@@ -496,14 +482,30 @@ cloudsentrix/
 | Feature | Status |
 |---------|--------|
 | GCP IAM — 5 rules, blast radius, remediation, live scan | ✅ Shipped |
-| AWS IAM — 7 rules, PassRole, AssumeRole, live scan, LocalStack | ✅ Shipped |
+| AWS IAM — 7 rules, blast radius, PassRole, live scan, LocalStack | ✅ Shipped |
 | Azure RBAC — 5 rules, blast radius, live scan | ✅ Shipped |
 | Azure AD / Entra ID — 6 rules, OAuth risks, orphaned apps | ✅ Shipped |
+| Terraform IaC Scanner — 10 rules, GCP+AWS+Azure | ✅ Shipped |
+| Terraform State Scanner — leaked secrets in .tfstate | ✅ Shipped |
+| Kubernetes RBAC Scanner — 6 rules | ✅ Shipped |
+| Cross-Cloud Attack Chain Detection — industry-first | ✅ Shipped |
 | Multi-Cloud Animated HTML Dashboard | ✅ Shipped |
 | Multi-Cloud PDF Report | ✅ Shipped |
 | Slack / Teams Webhook Alerts | ✅ Shipped |
 | CI/CD Templates — GitHub Actions, GitLab, Jenkins | ✅ Shipped |
 | Gemini AI Executive Summaries | ✅ Shipped |
+| Local Web Dashboard (Flask serve command) | 🔄 Planned |
+
+---
+
+## Running Tests
+
+```bash
+pip install -e ".[dev]"
+pytest tests/ -v
+```
+
+Expected: `144 passed`
 
 ---
 
@@ -513,10 +515,15 @@ MIT — free to use, modify, and distribute.
 
 ---
 
+<div align="center">
+
 ## Author
 
 **Talha Imran** — SOC Analyst | Cloud Security | Pentesting
 
-[![GitHub](https://img.shields.io/badge/GitHub-Talha--Imran--cloud-black)](https://github.com/Talha-Imran-cloud)
-[![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-blue)](https://linkedin.com/in/talha-imran)
-[![PyPI](https://img.shields.io/pypi/v/cloudsentrix?label=PyPI)](https://pypi.org/project/cloudsentrix/)
+[![Website](https://img.shields.io/badge/🌐_Website-cloudsentrix.netlify.app-black?style=for-the-badge)](https://cloudsentrix.netlify.app/)
+[![GitHub](https://img.shields.io/badge/GitHub-Talha--Imran--cloud-black?style=for-the-badge&logo=github)](https://github.com/Talha-Imran-cloud)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-Talha_Imran-black?style=for-the-badge&logo=linkedin)](https://www.linkedin.com/in/talha-imran-583a44420)
+[![PyPI](https://img.shields.io/badge/PyPI-cloudsentrix-black?style=for-the-badge&logo=pypi)](https://pypi.org/project/cloudsentrix/)
+
+</div>
