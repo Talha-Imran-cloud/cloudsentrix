@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>CloudSentrix — Multi-Cloud Security Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
+<style>
+:root{
+  --bg:#070707;--s0:#0B0B0B;--s1:#101010;--s2:#161616;--s3:#1E1E1E;--s4:#272727;
+  --bd:#202020;--bdb:#303030;--bdc:#3E3E3E;
+  --w:#F4F4F4;--w2:#C0C0C0;--w3:#888888;--w4:#505050;--w5:#333333;
+  --crit:#FF4444;--high:#FF8800;--med:#FFCC00;--low:#44CC44;
+  --gcp:#4285f4;--aws:#ff9900;--azure:#0078d4;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+html{scroll-behavior:smooth;}
+body{
+  background:var(--bg);color:var(--w);
+  font-family:'Inter',system-ui,sans-serif;
+  line-height:1.6;overflow-x:hidden;cursor:none;
+}
+::-webkit-scrollbar{width:3px;}
+::-webkit-scrollbar-track{background:var(--bg);}
+::-webkit-scrollbar-thumb{background:var(--bdb);border-radius:2px;}
+
+/* Trail canvas */
+#trail{position:fixed;top:0;left:0;pointer-events:none;z-index:9990;}
+
+/* Cursor */
+#cur{
+  position:fixed;width:8px;height:8px;
+  background:var(--w);border-radius:50%;
+  pointer-events:none;z-index:9999;
+  transform:translate(-50%,-50%);
+  transition:transform .15s,background .2s;
+  mix-blend-mode:difference;
+}
+
+/* Grid background */
+.grid-bg{
+  position:fixed;inset:0;pointer-events:none;z-index:0;
+  background-image:
+    linear-gradient(rgba(255,255,255,.018) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(255,255,255,.018) 1px,transparent 1px);
+  background-size:72px 72px;
+  mask-image:radial-gradient(ellipse 80% 80% at 50% 0%,black 0%,transparent 100%);
+}
+
+/* Header */
+header{
+  position:relative;z-index:10;
+  padding:48px 56px 40px;
+  border-bottom:1px solid var(--bd);
+  background:var(--s0);
+  display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:32px;
+}
+.hlogo{display:flex;align-items:center;gap:16px;}
+.hlogo-icon{
+  width:40px;height:40px;background:var(--s3);
+  border:1px solid var(--bdb);border-radius:10px;
+  display:flex;align-items:center;justify-content:center;
+  animation:float 4s ease-in-out infinite;
+}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
+.hlogo-text h1{font-size:22px;font-weight:900;letter-spacing:-1px;color:var(--w);}
+.hlogo-text p{font-size:12px;color:var(--w4);font-weight:500;letter-spacing:.5px;text-transform:uppercase;margin-top:2px;}
+.hstats{display:flex;gap:40px;}
+.hstat{text-align:center;}
+.hstat .val{
+  font-size:36px;font-weight:900;letter-spacing:-2px;
+  color:var(--w);display:block;line-height:1;
+}
+.hstat .val.danger{color:var(--crit);animation:pulse 2s infinite;}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
+.hstat .lbl{font-size:11px;font-weight:600;color:var(--w4);letter-spacing:.5px;text-transform:uppercase;margin-top:6px;}
+
+/* Section */
+.section{padding:56px;position:relative;z-index:10;}
+.section-title{
+  font-size:11px;font-weight:700;letter-spacing:3px;
+  text-transform:uppercase;color:var(--w4);margin-bottom:28px;
+  display:flex;align-items:center;gap:12px;
+}
+.section-title::after{content:'';flex:1;height:1px;background:var(--bd);}
+
+/* Score cards */
+.score-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1px;background:var(--bd);border:1px solid var(--bd);border-radius:16px;overflow:hidden;}
+.score-card{
+  background:var(--s1);padding:40px;
+  transition:background .25s;position:relative;overflow:hidden;
+  cursor:none;
+}
+.score-card:hover{background:var(--s2);}
+.score-card::before{
+  content:'';position:absolute;top:0;left:0;right:0;height:2px;
+  background:var(--card-color,var(--w4));
+}
+.cloud-label{
+  font-size:11px;font-weight:700;letter-spacing:3px;
+  text-transform:uppercase;color:var(--w4);margin-bottom:24px;
+  display:flex;align-items:center;gap:8px;
+}
+.cloud-label::before{
+  content:'';width:6px;height:6px;border-radius:50%;
+  background:var(--card-color,var(--w4));
+  animation:pd 2.5s ease-in-out infinite;
+}
+@keyframes pd{0%,100%{opacity:.5}50%{opacity:1}}
+.score-val{
+  font-size:72px;font-weight:900;letter-spacing:-5px;line-height:1;
+  color:var(--score-color,var(--w));margin-bottom:16px;
+}
+.score-suffix{font-size:24px;font-weight:400;color:var(--w4);}
+.score-bar-bg{background:var(--s3);border-radius:2px;height:3px;margin:16px 0;overflow:hidden;}
+.score-bar{height:3px;border-radius:2px;width:0;transition:width 1.5s cubic-bezier(.4,0,.2,1);background:var(--score-color,var(--w3));}
+.score-sub{font-size:12px;color:var(--w4);font-weight:600;letter-spacing:.5px;text-transform:uppercase;}
+.score-meta{display:flex;gap:16px;margin-top:16px;}
+.score-badge{
+  font-size:11px;font-weight:700;font-family:'JetBrains Mono',monospace;
+  padding:4px 10px;border-radius:4px;
+  background:var(--s3);border:1px solid var(--bd);color:var(--w4);
+}
+.score-badge.crit{background:rgba(255,68,68,.1);border-color:rgba(255,68,68,.2);color:var(--crit);}
+.score-badge.high{background:rgba(255,136,0,.1);border-color:rgba(255,136,0,.2);color:var(--high);}
+
+/* Charts */
+.charts-grid{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--bd);border:1px solid var(--bd);border-radius:16px;overflow:hidden;}
+.chart-card{background:var(--s1);padding:40px;transition:background .25s;}
+.chart-card:hover{background:var(--s2);}
+.chart-title{font-size:12px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--w4);margin-bottom:24px;}
+canvas{max-height:240px;}
+
+/* Tables */
+.table-wrap{background:var(--s1);border:1px solid var(--bd);border-radius:16px;overflow:hidden;}
+table{width:100%;border-collapse:collapse;font-size:13px;}
+th{
+  background:var(--s0);padding:12px 16px;text-align:left;
+  border-bottom:1px solid var(--bd);
+  font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--w4);
+}
+td{padding:12px 16px;border-bottom:1px solid var(--bd);transition:background .15s;}
+tr:last-child td{border-bottom:none;}
+tr:hover td{background:var(--s2);}
+.badge{
+  display:inline-block;padding:2px 8px;border-radius:4px;
+  font-size:10px;font-weight:700;font-family:'JetBrains Mono',monospace;
+  background:var(--s3);border:1px solid var(--bd);color:var(--w4);
+}
+.badge.CRITICAL{background:rgba(255,68,68,.1);border-color:rgba(255,68,68,.2);color:var(--crit);}
+.badge.HIGH{background:rgba(255,136,0,.1);border-color:rgba(255,136,0,.2);color:var(--high);}
+.badge.MEDIUM{background:rgba(255,204,0,.1);border-color:rgba(255,204,0,.2);color:var(--med);}
+.badge.LOW{background:rgba(68,204,68,.1);border-color:rgba(68,204,68,.2);color:var(--low);}
+code{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--w3);}
+
+/* Severity rows */
+.sev-row-CRITICAL td{background:rgba(255,68,68,.03);}
+.sev-row-HIGH td{background:rgba(255,136,0,.03);}
+
+/* Finding row animation */
+.finding-row{opacity:0;animation:fadeUp .5s ease forwards;}
+@keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+
+/* Reveal */
+.reveal{opacity:0;transform:translateY(24px);transition:opacity .7s ease,transform .7s ease;}
+.reveal.visible{opacity:1;transform:translateY(0);}
+
+/* Particles */
+.particles{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:1;}
+.particle{position:absolute;border-radius:50%;animation:pfloat linear infinite;opacity:.06;}
+@keyframes pfloat{0%{transform:translateY(100vh) rotate(0deg)}100%{transform:translateY(-100vh) rotate(360deg)}}
+
+/* Footer */
+footer{
+  position:relative;z-index:10;
+  padding:32px 56px;
+  border-top:1px solid var(--bd);
+  background:var(--s0);
+  text-align:center;
+  font-size:12px;color:var(--w4);
+}
+footer a{color:var(--w3);text-decoration:none;}
+footer a:hover{color:var(--w);}
+
+@media(max-width:768px){
+  .charts-grid{grid-template-columns:1fr;}
+  header{padding:32px 24px;}
+  .section{padding:32px 24px;}
+  .hstats{gap:20px;}
+}
+</style>
+</head>
+<body>
+<canvas id="trail"></canvas>
+<div id="cur"></div>
+<div class="grid-bg"></div>
+<div class="particles" id="particles"></div>
+
+<header>
+  <div class="hlogo">
+    <div class="hlogo-icon">
+      <svg width="20" height="14" viewBox="0 0 100 68" fill="none">
+        <path d="M78 58H26C14.4 58 5 48.6 5 37s9.4-21 21-21c1.4 0 2.8.14 4.1.4C34.2 8.8 43.8 2 55 2c14.6 0 26.6 10.8 27.8 24.6C83.8 26.2 84.9 26 86 26c7.7 0 14 6.3 14 14s-6.3 14-14 14H78z" fill="url(#hg)"/>
+        <defs><linearGradient id="hg" x1="5" y1="2" x2="100" y2="68" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#888"/><stop offset="1" stop-color="#444"/></linearGradient></defs>
+      </svg>
+    </div>
+    <div class="hlogo-text">
+      <h1>CloudSentrix</h1>
+      <p>Multi-Cloud Security Dashboard</p>
+    </div>
+  </div>
+  <div class="hstats">
+    <div class="hstat">
+      <span class="val counter" data-target="3">3</span>
+      <div class="lbl">Clouds</div>
+    </div>
+    <div class="hstat">
+      <span class="val danger counter" data-target="21">0</span>
+      <div class="lbl">Critical</div>
+    </div>
+    <div class="hstat">
+      <span class="val counter" data-target="26">0</span>
+      <div class="lbl">Findings</div>
+    </div>
+  </div>
+</header>
+
+<!-- Score Cards -->
+<div class="section reveal">
+  <div class="section-title">Security Score by Cloud</div>
+  <div class="score-grid"><div class="score-card" style="--card-color:#4285f4;--score-color:#FF4444"><div class="cloud-label">☁️ GCP</div><div class="score-val"><span class="counter" data-target="35">0</span><span class="score-suffix">/100</span></div><div class="score-bar-bg"><div class="score-bar" data-width="35"></div></div><div class="score-sub">Rating: Poor &nbsp;·&nbsp; 3 finding(s)</div><div class="score-meta"><span class="score-badge crit">🔴 2 Critical</span><span class="score-badge high">🟠 1 High</span></div></div><div class="score-card" style="--card-color:#ff9900;--score-color:#FF4444"><div class="cloud-label">🟡 AWS</div><div class="score-val"><span class="counter" data-target="0">0</span><span class="score-suffix">/100</span></div><div class="score-bar-bg"><div class="score-bar" data-width="0"></div></div><div class="score-sub">Rating: Critical &nbsp;·&nbsp; 14 finding(s)</div><div class="score-meta"><span class="score-badge crit">🔴 14 Critical</span><span class="score-badge">🟠 0 High</span></div></div><div class="score-card" style="--card-color:#0078d4;--score-color:#FF4444"><div class="cloud-label">🔷 Azure</div><div class="score-val"><span class="counter" data-target="15">0</span><span class="score-suffix">/100</span></div><div class="score-bar-bg"><div class="score-bar" data-width="15"></div></div><div class="score-sub">Rating: F &nbsp;·&nbsp; 9 finding(s)</div><div class="score-meta"><span class="score-badge crit">🔴 5 Critical</span><span class="score-badge high">🟠 4 High</span></div></div></div>
+</div>
+
+<!-- Charts -->
+<div class="section reveal">
+  <div class="section-title">Risk Comparison</div>
+  <div class="charts-grid">
+    <div class="chart-card">
+      <div class="chart-title">Security Scores</div>
+      <canvas id="scoreChart"></canvas>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Findings by Severity</div>
+      <canvas id="severityChart"></canvas>
+    </div>
+  </div>
+</div>
+
+<!-- Severity Table -->
+<div class="section reveal">
+  <div class="section-title">Severity Breakdown</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Severity</th><th style="color:#4285f4">☁️ GCP</th><th style="color:#ff9900">🟡 AWS</th><th style="color:#0078d4">🔷 Azure</th><th>Total</th></tr></thead>
+      <tbody><tr class="sev-row-CRITICAL"><td><span class="badge CRITICAL">CRITICAL</span></td><td style="text-align:center;font-family:JetBrains Mono,monospace;font-weight:700;color:#FF4444">2</td><td style="text-align:center;font-family:JetBrains Mono,monospace;font-weight:700;color:#FF4444">14</td><td style="text-align:center;font-family:JetBrains Mono,monospace;font-weight:700;color:#FF4444">5</td><td style="text-align:center;font-weight:700">21</td></tr><tr class="sev-row-HIGH"><td><span class="badge HIGH">HIGH</span></td><td style="text-align:center;font-family:JetBrains Mono,monospace;font-weight:700;color:#FF8800">1</td><td style="text-align:center;font-family:JetBrains Mono,monospace;font-weight:700;color:#FF8800">0</td><td style="text-align:center;font-family:JetBrains Mono,monospace;font-weight:700;color:#FF8800">4</td><td style="text-align:center;font-weight:700">5</td></tr><tr class="sev-row-MEDIUM"><td><span class="badge MEDIUM">MEDIUM</span></td><td style="text-align:center;font-family:JetBrains Mono,monospace;font-weight:700;color:#FFCC00">0</td><td style="text-align:center;font-family:JetBrains Mono,monospace;font-weight:700;color:#FFCC00">0</td><td style="text-align:center;font-family:JetBrains Mono,monospace;font-weight:700;color:#FFCC00">0</td><td style="text-align:center;font-weight:700">0</td></tr><tr class="sev-row-LOW"><td><span class="badge LOW">LOW</span></td><td style="text-align:center;font-family:JetBrains Mono,monospace;font-weight:700;color:#44CC44">0</td><td style="text-align:center;font-family:JetBrains Mono,monospace;font-weight:700;color:#44CC44">0</td><td style="text-align:center;font-family:JetBrains Mono,monospace;font-weight:700;color:#44CC44">0</td><td style="text-align:center;font-weight:700">0</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- All Findings -->
+<div class="section reveal">
+  <div class="section-title">All Findings — 26 total</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Cloud</th><th>Rule</th><th>Title</th><th>Severity</th><th>Principal</th><th>MITRE</th></tr></thead>
+      <tbody><tr class="finding-row">
+          <td><span class="badge" style="background:#4285f4">☁️ GCP</span></td>
+          <td><span class="badge" style="background:#e53935">GCP-002</span></td>
+          <td>Service Account Token Creator</td>
+          <td><span class="badge" style="background:#e53935">CRITICAL</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">app-backend@my-project.iam.gserviceaccount.co</td>
+          <td><code>T1098.001</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#4285f4">☁️ GCP</span></td>
+          <td><span class="badge" style="background:#e53935">GCP-004</span></td>
+          <td>IAM Policy Administrator</td>
+          <td><span class="badge" style="background:#e53935">CRITICAL</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">admin@company.com</td>
+          <td><code>T1098.003</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#ff9900">🟡 AWS</span></td>
+          <td><span class="badge" style="background:#e53935">AWS-001</span></td>
+          <td>Administrator Access — Full AWS Control</td>
+          <td><span class="badge" style="background:#e53935">CRITICAL</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">arn:aws:iam::123456789012:user/admin-alice</td>
+          <td><code>T1078.004</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#ff9900">🟡 AWS</span></td>
+          <td><span class="badge" style="background:#e53935">AWS-001</span></td>
+          <td>Administrator Access — Full AWS Control</td>
+          <td><span class="badge" style="background:#e53935">CRITICAL</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">arn:aws:iam::123456789012:group/admins</td>
+          <td><code>T1078.004</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#ff9900">🟡 AWS</span></td>
+          <td><span class="badge" style="background:#e53935">AWS-001</span></td>
+          <td>Administrator Access — Full AWS Control</td>
+          <td><span class="badge" style="background:#e53935">CRITICAL</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">arn:aws:iam::123456789012:role/ec2-admin-role</td>
+          <td><code>T1078.004</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#ff9900">🟡 AWS</span></td>
+          <td><span class="badge" style="background:#e53935">AWS-001</span></td>
+          <td>Administrator Access — Full AWS Control</td>
+          <td><span class="badge" style="background:#e53935">CRITICAL</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">arn:aws:iam::123456789012:role/cross-account-</td>
+          <td><code>T1078.004</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#ff9900">🟡 AWS</span></td>
+          <td><span class="badge" style="background:#e53935">AWS-002</span></td>
+          <td>IAM PassRole — Privilege Escalation via Service</td>
+          <td><span class="badge" style="background:#e53935">CRITICAL</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">arn:aws:iam::123456789012:user/developer-bob</td>
+          <td><code>T1098.003</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#ff9900">🟡 AWS</span></td>
+          <td><span class="badge" style="background:#e53935">AWS-002</span></td>
+          <td>IAM PassRole — Privilege Escalation via Service</td>
+          <td><span class="badge" style="background:#e53935">CRITICAL</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">arn:aws:iam::123456789012:group/devops</td>
+          <td><code>T1098.003</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#ff9900">🟡 AWS</span></td>
+          <td><span class="badge" style="background:#e53935">AWS-002</span></td>
+          <td>IAM PassRole — Privilege Escalation via Service</td>
+          <td><span class="badge" style="background:#e53935">CRITICAL</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">arn:aws:iam::123456789012:role/ci-cd-deploy-r</td>
+          <td><code>T1098.003</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#ff9900">🟡 AWS</span></td>
+          <td><span class="badge" style="background:#e53935">AWS-003</span></td>
+          <td>IAM Policy Manipulation — Self-Escalation Path</td>
+          <td><span class="badge" style="background:#e53935">CRITICAL</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">arn:aws:iam::123456789012:group/devops</td>
+          <td><code>T1098.003</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#ff9900">🟡 AWS</span></td>
+          <td><span class="badge" style="background:#e53935">AWS-003</span></td>
+          <td>IAM Policy Manipulation — Self-Escalation Path</td>
+          <td><span class="badge" style="background:#e53935">CRITICAL</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">arn:aws:iam::123456789012:role/ci-cd-deploy-r</td>
+          <td><code>T1098.003</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#ff9900">🟡 AWS</span></td>
+          <td><span class="badge" style="background:#e53935">AWS-004</span></td>
+          <td>Publicly Assumable Role — Trust Policy Allows Anyone</td>
+          <td><span class="badge" style="background:#e53935">CRITICAL</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">arn:aws:iam::123456789012:role/cross-account-</td>
+          <td><code>T1078.004</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#ff9900">🟡 AWS</span></td>
+          <td><span class="badge" style="background:#e53935">AWS-005</span></td>
+          <td>Access Key Creation — Long-Lived Credential Backdoor</td>
+          <td><span class="badge" style="background:#e53935">CRITICAL</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">arn:aws:iam::123456789012:user/devops-diana</td>
+          <td><code>T1098.001</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#ff9900">🟡 AWS</span></td>
+          <td><span class="badge" style="background:#e53935">AWS-005</span></td>
+          <td>Access Key Creation — Long-Lived Credential Backdoor</td>
+          <td><span class="badge" style="background:#e53935">CRITICAL</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">arn:aws:iam::123456789012:role/ci-cd-deploy-r</td>
+          <td><code>T1098.001</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#ff9900">🟡 AWS</span></td>
+          <td><span class="badge" style="background:#e53935">AWS-006</span></td>
+          <td>Backdoor IAM User Creation</td>
+          <td><span class="badge" style="background:#e53935">CRITICAL</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">arn:aws:iam::123456789012:role/ci-cd-deploy-r</td>
+          <td><code>T1136.003</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#ff9900">🟡 AWS</span></td>
+          <td><span class="badge" style="background:#e53935">AWS-007</span></td>
+          <td>IAMFullAccess — Complete IAM Control</td>
+          <td><span class="badge" style="background:#e53935">CRITICAL</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">arn:aws:iam::123456789012:user/devops-diana</td>
+          <td><code>T1098.003</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#0078d4">🔷 Azure</span></td>
+          <td><span class="badge" style="background:#e53935">AZ-001</span></td>
+          <td>Owner / Contributor at Broad Scope</td>
+          <td><span class="badge" style="background:#e53935">CRITICAL</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">alice@contoso.com</td>
+          <td><code>T1078.004</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#0078d4">🔷 Azure</span></td>
+          <td><span class="badge" style="background:#e53935">AZ-001</span></td>
+          <td>Owner / Contributor at Broad Scope</td>
+          <td><span class="badge" style="background:#e53935">CRITICAL</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">app-backend-sp</td>
+          <td><code>T1078.004</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#0078d4">🔷 Azure</span></td>
+          <td><span class="badge" style="background:#e53935">AZ-002</span></td>
+          <td>Service Principal with High-Privilege Role</td>
+          <td><span class="badge" style="background:#e53935">CRITICAL</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">app-backend-sp</td>
+          <td><code>T1098.001</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#0078d4">🔷 Azure</span></td>
+          <td><span class="badge" style="background:#e53935">AZ-003</span></td>
+          <td>Guest User with Elevated Role</td>
+          <td><span class="badge" style="background:#e53935">CRITICAL</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">bob_ext_partner.com#EXT#@contoso.onmicrosoft.</td>
+          <td><code>T1078.006</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#0078d4">🔷 Azure</span></td>
+          <td><span class="badge" style="background:#e53935">AZ-003</span></td>
+          <td>Guest User with Elevated Role</td>
+          <td><span class="badge" style="background:#e53935">CRITICAL</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">guest_vendor_acme.com#EXT#@contoso.onmicrosof</td>
+          <td><code>T1078.006</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#4285f4">☁️ GCP</span></td>
+          <td><span class="badge" style="background:#fb8c00">GCP-005</span></td>
+          <td>Service Account Impersonation via Resource Attach</td>
+          <td><span class="badge" style="background:#fb8c00">HIGH</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">intern@company.com</td>
+          <td><code>T1548.005</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#0078d4">🔷 Azure</span></td>
+          <td><span class="badge" style="background:#fb8c00">AZ-001</span></td>
+          <td>Owner / Contributor at Broad Scope</td>
+          <td><span class="badge" style="background:#fb8c00">HIGH</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">bob_ext_partner.com#EXT#@contoso.onmicrosoft.</td>
+          <td><code>T1078.004</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#0078d4">🔷 Azure</span></td>
+          <td><span class="badge" style="background:#fb8c00">AZ-005</span></td>
+          <td>Custom Role with Dangerous Permissions</td>
+          <td><span class="badge" style="background:#fb8c00">HIGH</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">charlie@contoso.com</td>
+          <td><code>T1098.003</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#0078d4">🔷 Azure</span></td>
+          <td><span class="badge" style="background:#fb8c00">AZ-004</span></td>
+          <td>Wildcard / Over-permissive Role Scope</td>
+          <td><span class="badge" style="background:#fb8c00">HIGH</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">dave@contoso.com</td>
+          <td><code>T1548.005</code></td>
+        </tr><tr class="finding-row">
+          <td><span class="badge" style="background:#0078d4">🔷 Azure</span></td>
+          <td><span class="badge" style="background:#fb8c00">AZ-005</span></td>
+          <td>Custom Role with Dangerous Permissions</td>
+          <td><span class="badge" style="background:#fb8c00">HIGH</span></td>
+          <td style="font-size:.8rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">dave@contoso.com</td>
+          <td><code>T1098.003</code></td>
+        </tr></tbody>
+    </table>
+  </div>
+</div>
+
+<footer>
+  Generated by <strong>CloudSentrix</strong> &nbsp;·&nbsp;
+  <a href="https://github.com/Talha-Imran-cloud/cloudsentrix" target="_blank">github.com/Talha-Imran-cloud/cloudsentrix</a>
+  &nbsp;·&nbsp; Built by <a href="https://www.linkedin.com/in/talha-imran-583a44420" target="_blank">Talha Imran</a>
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+/* Mouse Trail */
+const canvas=document.getElementById('trail');
+const ctx=canvas.getContext('2d');
+function resize(){canvas.width=window.innerWidth;canvas.height=window.innerHeight;}
+resize();window.addEventListener('resize',resize);
+const pts=[];
+document.addEventListener('mousemove',e=>{pts.push({x:e.clientX,y:e.clientY,t:Date.now()});document.getElementById('cur').style.left=e.clientX+'px';document.getElementById('cur').style.top=e.clientY+'px';});
+(function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  const now=Date.now();
+  while(pts.length>0&&now-pts[0].t>600)pts.shift();
+  if(pts.length>1){
+    for(let i=1;i<pts.length;i++){
+      const prog=i/pts.length,alpha=prog*0.35,w=prog*2;
+      ctx.beginPath();ctx.moveTo(pts[i-1].x,pts[i-1].y);ctx.lineTo(pts[i].x,pts[i].y);
+      ctx.strokeStyle=`rgba(220,220,220,${alpha})`;ctx.lineWidth=w;
+      ctx.lineCap='round';ctx.stroke();
+    }
+  }
+  requestAnimationFrame(draw);
+})();
+
+/* Particles */
+(function(){
+  const colors=['#4285f4','#ff9900','#0078d4','#F4F4F4','#888888'];
+  const p=document.getElementById('particles');
+  for(let i=0;i<20;i++){
+    const el=document.createElement('div');
+    el.className='particle';
+    const s=Math.random()*4+2;
+    el.style.cssText=`width:${s}px;height:${s}px;background:${colors[i%colors.length]};left:${Math.random()*100}%;animation-duration:${Math.random()*20+15}s;animation-delay:-${Math.random()*15}s;`;
+    p.appendChild(el);
+  }
+})();
+
+/* Scroll reveal */
+const obs=new IntersectionObserver(e=>{e.forEach(x=>{if(x.isIntersecting){x.target.classList.add('visible');obs.unobserve(x.target);}});},{threshold:.12});
+document.querySelectorAll('.reveal').forEach(el=>obs.observe(el));
+
+/* Counter */
+const cobs=new IntersectionObserver(e=>{e.forEach(x=>{if(x.isIntersecting){animCounter(x.target);cobs.unobserve(x.target);}});},{threshold:.5});
+document.querySelectorAll('.counter').forEach(el=>cobs.observe(el));
+function animCounter(el){
+  const target=parseInt(el.dataset.target)||0;
+  const dur=1600,s=performance.now();
+  (function go(now){
+    const p=Math.min((now-s)/dur,1),e=1-Math.pow(1-p,3);
+    el.textContent=Math.round(e*target);
+    if(p<1)requestAnimationFrame(go);
+  })(s);
+}
+
+/* Score bars */
+const bobs=new IntersectionObserver(e=>{e.forEach(x=>{if(x.isIntersecting){const b=x.target.querySelector('.score-bar');if(b)setTimeout(()=>b.style.width=b.dataset.width+'%',200);bobs.unobserve(x.target);}});},{threshold:.3});
+document.querySelectorAll('.score-card').forEach(el=>bobs.observe(el));
+
+/* Finding rows stagger */
+document.querySelectorAll('.finding-row').forEach((r,i)=>{r.style.animationDelay=(i*0.03)+'s';});
+
+/* Charts */
+Chart.defaults.color='#505050';
+Chart.defaults.borderColor='#202020';
+Chart.defaults.font.family='Inter';
+
+new Chart(document.getElementById('scoreChart'),{
+  type:'bar',
+  data:{
+    labels:["GCP", "AWS", "Azure"],
+    datasets:[{
+      label:'Score',data:[35, 0, 15],
+      backgroundColor:["#4285f4", "#ff9900", "#0078d4"].map(c=>c+'22'),
+      borderColor:["#4285f4", "#ff9900", "#0078d4"],
+      borderWidth:1.5,borderRadius:4,borderSkipped:false,
+    }]
+  },
+  options:{
+    responsive:true,
+    animation:{duration:1200,easing:'easeOutQuart'},
+    plugins:{legend:{display:false}},
+    scales:{
+      y:{min:0,max:100,grid:{color:'#161616'},ticks:{color:'#505050',font:{size:11}}},
+      x:{grid:{display:false},ticks:{color:'#888888',font:{size:11}}}
+    }
+  }
+});
+
+new Chart(document.getElementById('severityChart'),{
+  type:'bar',
+  data:{
+    labels:["GCP", "AWS", "Azure"],
+    datasets:[
+      {label:'Critical',data:[2, 14, 5],backgroundColor:'rgba(255,68,68,.15)',borderColor:'#FF4444',borderWidth:1.5,borderRadius:3},
+      {label:'High',    data:[1, 0, 4],   backgroundColor:'rgba(255,136,0,.15)', borderColor:'#FF8800',borderWidth:1.5,borderRadius:3},
+      {label:'Medium',  data:[0, 0, 0], backgroundColor:'rgba(255,204,0,.15)', borderColor:'#FFCC00',borderWidth:1.5,borderRadius:3},
+      {label:'Low',     data:[0, 0, 0],    backgroundColor:'rgba(68,204,68,.15)', borderColor:'#44CC44',borderWidth:1.5,borderRadius:3},
+    ]
+  },
+  options:{
+    responsive:true,
+    animation:{duration:1400,easing:'easeOutQuart'},
+    plugins:{legend:{labels:{color:'#888888',font:{size:11}}}},
+    scales:{
+      y:{grid:{color:'#161616'},ticks:{color:'#505050',font:{size:11}}},
+      x:{grid:{display:false},ticks:{color:'#888888',font:{size:11}}}
+    }
+  }
+});
+</script>
+</body>
+</html>

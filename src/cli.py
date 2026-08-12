@@ -98,7 +98,7 @@ from azure_live_scanner import fetch_azure_live
 
 logger = logging.getLogger(__name__)
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 SEVERITY_CHOICES: dict[str, Severity] = {
     "all": Severity.LOW,
@@ -1214,60 +1214,251 @@ setup();
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<title>CloudSentrix Dashboard</title>
-<style>{DASHBOARD_CSS}</style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>CloudSentrix — Security Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
+<style>
+:root{{
+  --bg:#070707;--s0:#0B0B0B;--s1:#101010;--s2:#161616;--s3:#1E1E1E;--s4:#272727;
+  --bd:#202020;--bdb:#303030;--bdc:#3E3E3E;
+  --w:#F4F4F4;--w2:#C0C0C0;--w3:#888888;--w4:#505050;--w5:#333333;
+  --crit:#FF4444;--high:#FF8800;--med:#FFCC00;--low:#44CC44;
+}}
+*{{box-sizing:border-box;margin:0;padding:0;}}
+html{{scroll-behavior:smooth;}}
+body{{background:var(--bg);color:var(--w);font-family:'Inter',system-ui,sans-serif;line-height:1.6;overflow-x:hidden;cursor:none;}}
+::-webkit-scrollbar{{width:3px;}};::-webkit-scrollbar-track{{background:var(--bg);}};::-webkit-scrollbar-thumb{{background:var(--bdb);border-radius:2px;}}
+#trail{{position:fixed;top:0;left:0;pointer-events:none;z-index:9990;}}
+#cur{{position:fixed;width:8px;height:8px;background:var(--w);border-radius:50%;pointer-events:none;z-index:9999;transform:translate(-50%,-50%);mix-blend-mode:difference;}}
+.grid-bg{{position:fixed;inset:0;pointer-events:none;z-index:0;background-image:linear-gradient(rgba(255,255,255,.018) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.018) 1px,transparent 1px);background-size:72px 72px;mask-image:radial-gradient(ellipse 80% 80% at 50% 0%,black 0%,transparent 100%);}}
+.particles{{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:1;}}
+.particle{{position:absolute;border-radius:50%;animation:pfloat linear infinite;opacity:.05;}}
+@keyframes pfloat{{0%{{transform:translateY(100vh)}}100%{{transform:translateY(-100vh)}}}}
+
+header{{position:relative;z-index:10;padding:48px 56px 40px;border-bottom:1px solid var(--bd);background:var(--s0);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:24px;}}
+.hlogo{{display:flex;align-items:center;gap:14px;}}
+.hlogo-icon{{width:38px;height:38px;background:var(--s3);border:1px solid var(--bdb);border-radius:10px;display:flex;align-items:center;justify-content:center;animation:float 4s ease-in-out infinite;}}
+@keyframes float{{0%,100%{{transform:translateY(0)}}50%{{transform:translateY(-5px)}}}}
+.hlogo h1{{font-size:20px;font-weight:900;letter-spacing:-1px;}}
+.hlogo p{{font-size:11px;color:var(--w4);font-weight:600;letter-spacing:.5px;text-transform:uppercase;margin-top:2px;}}
+.hmeta{{font-size:11px;color:var(--w4);text-align:right;line-height:1.8;font-family:'JetBrains Mono',monospace;}}
+
+.section{{padding:48px 56px;position:relative;z-index:10;}}
+.section-title{{font-size:10px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:var(--w4);margin-bottom:24px;display:flex;align-items:center;gap:12px;}}
+.section-title::after{{content:'';flex:1;height:1px;background:var(--bd);}}
+
+.score-row{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1px;background:var(--bd);border:1px solid var(--bd);border-radius:14px;overflow:hidden;}}
+.score-card{{background:var(--s1);padding:28px;transition:background .2s;cursor:none;}}
+.score-card:hover{{background:var(--s2);}}
+.score-card .label{{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--w4);margin-bottom:12px;}}
+.score-card .value{{font-size:36px;font-weight:900;letter-spacing:-2px;line-height:1;}}
+.score-card .sub{{font-size:11px;color:var(--w4);margin-top:8px;}}
+.score-bar-bg{{background:var(--s3);border-radius:2px;height:2px;margin-top:14px;overflow:hidden;}}
+.score-bar-fill{{height:2px;border-radius:2px;transition:width 1.5s cubic-bezier(.4,0,.2,1);}}
+
+.grid-3{{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--bd);border:1px solid var(--bd);border-radius:14px;overflow:hidden;margin:0 56px 0;}}
+.panel{{background:var(--s1);padding:32px;transition:background .2s;position:relative;z-index:10;}}
+.panel:hover{{background:var(--s2);}}
+.panel h2{{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--w4);margin-bottom:20px;}}
+.panel table{{width:100%;border-collapse:collapse;font-size:12px;}}
+.panel th{{padding:8px 10px;text-align:left;border-bottom:1px solid var(--bd);font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--w4);}}
+.panel td{{padding:9px 10px;border-bottom:1px solid var(--bd);}}
+.panel tr:last-child td{{border-bottom:none;}}
+.panel tr:hover td{{background:var(--s3);}}
+.badge{{display:inline-block;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:700;font-family:'JetBrains Mono',monospace;}}
+code{{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--w3);}}
+small{{color:var(--w4);font-size:10px;}}
+
+.donut-wrap{{display:flex;align-items:center;gap:24px;}}
+.donut{{width:100px;height:100px;border-radius:50%;flex-shrink:0;position:relative;display:flex;align-items:center;justify-content:center;}}
+.donut-center{{background:var(--s1);width:60px;height:60px;border-radius:50%;display:flex;flex-direction:column;align-items:center;justify-content:center;}}
+.donut-center .n{{font-size:18px;font-weight:900;letter-spacing:-1px;}}
+.donut-center .t{{font-size:8px;color:var(--w4);font-weight:700;letter-spacing:1px;text-transform:uppercase;}}
+.donut-legend{{flex:1;}}
+.donut-legend-item{{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--w3);margin-bottom:6px;}}
+.dot{{width:6px;height:6px;border-radius:50%;flex-shrink:0;}}
+.pct{{margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--w4);}}
+
+.cat-row{{display:flex;align-items:center;gap:10px;margin-bottom:8px;font-size:11px;}}
+.cat-label{{width:130px;flex-shrink:0;color:var(--w3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}}
+.cat-bar-bg{{flex:1;background:var(--s3);border-radius:2px;height:4px;}}
+.cat-bar-fill{{height:4px;border-radius:2px;transition:width 1s ease;}}
+.cat-count{{width:28px;text-align:right;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--w4);}}
+
+.risky-row{{display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--bd);}}
+.risky-row:last-child{{border-bottom:none;}}
+.risky-id{{font-size:11px;color:var(--w2);font-family:'JetBrains Mono',monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:220px;}}
+
+.overview-row{{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--bd);border:1px solid var(--bd);border-radius:14px;overflow:hidden;margin-bottom:1px;}}
+.overview-card{{background:var(--s1);padding:28px;display:flex;align-items:center;gap:16px;transition:background .2s;}}
+.overview-card:hover{{background:var(--s2);}}
+.overview-icon{{font-size:22px;}}
+.overview-card .n{{font-size:28px;font-weight:900;letter-spacing:-1px;line-height:1;}}
+.overview-card .t{{font-size:10px;color:var(--w4);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-top:4px;}}
+
+.crit-list{{list-style:none;}}
+.crit-item{{display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid var(--bd);}}
+.crit-item:last-child{{border-bottom:none;}}
+.crit-dot{{width:6px;height:6px;border-radius:50%;flex-shrink:0;margin-top:5px;}}
+.crit-text{{font-size:12px;font-weight:600;color:var(--w2);}}
+.crit-principal{{font-size:10px;color:var(--w4);font-family:'JetBrains Mono',monospace;margin-top:2px;}}
+
+.graph-panel{{background:var(--s1);border:1px solid var(--bd);border-radius:14px;overflow:hidden;margin:0 56px 0;transition:background .2s;position:relative;z-index:10;}}
+.graph-panel:hover{{background:var(--s2);}}
+.graph-header{{padding:24px 32px;border-bottom:1px solid var(--bd);}}
+.graph-header h2{{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--w4);}}
+.legend{{display:flex;gap:20px;margin-top:10px;flex-wrap:wrap;}}
+.legend-item{{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--w4);}}
+#graph-canvas{{width:100%;display:block;background:transparent;}}
+
+.full-table-panel{{background:var(--s1);border:1px solid var(--bd);border-radius:14px;overflow:hidden;margin:0 56px;position:relative;z-index:10;}}
+.full-table-panel h2{{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--w4);padding:24px 32px 0;margin-bottom:0;}}
+.full-table-panel table{{width:100%;border-collapse:collapse;font-size:12px;}}
+.full-table-panel th{{padding:10px 16px;text-align:left;border-bottom:1px solid var(--bd);font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--w4);}}
+.full-table-panel td{{padding:10px 16px;border-bottom:1px solid var(--bd);vertical-align:top;}}
+.full-table-panel tr:last-child td{{border-bottom:none;}}
+.full-table-panel tr:hover td{{background:var(--s2);}}
+
+footer{{position:relative;z-index:10;padding:24px 56px;border-top:1px solid var(--bd);background:var(--s0);text-align:center;font-size:11px;color:var(--w4);}}
+footer a{{color:var(--w3);text-decoration:none;}}
+footer a:hover{{color:var(--w);}}
+
+.reveal{{opacity:0;transform:translateY(20px);transition:opacity .7s ease,transform .7s ease;}}
+.reveal.visible{{opacity:1;transform:translateY(0);}}
+
+@media(max-width:900px){{
+  .grid-3,.overview-row{{grid-template-columns:1fr;}}
+  header,.section,.graph-panel,.full-table-panel{{padding:28px 24px;}}
+  .grid-3,.graph-panel,.full-table-panel{{margin:0 0;}}
+}}
+</style>
 </head>
 <body>
-<div class="header">
-  <div>
-    <h1>Dashboard</h1>
-    <div class="meta">Overview of your GCP security posture</div>
+<canvas id="trail"></canvas>
+<div id="cur"></div>
+<div class="grid-bg"></div>
+<div class="particles" id="particles"></div>
+
+<header>
+  <div class="hlogo">
+    <div class="hlogo-icon">
+      <svg width="20" height="14" viewBox="0 0 100 68" fill="none">
+        <path d="M78 58H26C14.4 58 5 48.6 5 37s9.4-21 21-21c1.4 0 2.8.14 4.1.4C34.2 8.8 43.8 2 55 2c14.6 0 26.6 10.8 27.8 24.6C83.8 26.2 84.9 26 86 26c7.7 0 14 6.3 14 14s-6.3 14-14 14H78z" fill="url(#hg)"/>
+        <defs><linearGradient id="hg" x1="5" y1="2" x2="100" y2="68" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#888"/><stop offset="1" stop-color="#444"/></linearGradient></defs>
+      </svg>
+    </div>
+    <div>
+      <h1>CloudSentrix</h1>
+      <p>Security Dashboard</p>
+    </div>
   </div>
-  <div class="meta" style="text-align:right">
-    Source: {_html_escape(result.source_file)}<br>Generated: {generated_at}
+  <div class="hmeta">
+    Source: {_html_escape(result.source_file)}<br>
+    Cloud: {result.cloud.upper()}&nbsp;·&nbsp;Generated: {generated_at}
   </div>
+</header>
+
+<div class="section reveal">
+  <div class="section-title">Security Score</div>
+  <div class="score-row">{score_cards}</div>
 </div>
 
-<div class="score-row">{score_cards}</div>
+<div class="grid-3 reveal">{donut_html}{category_html}{top_risky_html}</div>
 
-<div class="grid-3">{donut_html}{category_html}{top_risky_html}</div>
+<div style="height:1px;background:var(--bd);margin:48px 56px;position:relative;z-index:10;"></div>
 
-<div class="panel" style="margin-bottom:1.1rem">
-  <h2>🔴 Interactive Attack Graph</h2>
-  <div class="legend">
-    <span class="legend-item"><span class="dot" style="background:#dc2626"></span>Critical</span>
-    <span class="legend-item"><span class="dot" style="background:#ea580c"></span>High</span>
-    <span class="legend-item"><span class="dot" style="background:#3b82f6"></span>Normal</span>
-    <span class="legend-item"><span class="dot" style="background:#475569;border-radius:2px"></span>Role</span>
-    <span class="legend-item"><span style="color:#dc2626">┈┈&gt;</span>&nbsp;Escalation path</span>
+<div class="overview-row reveal">{overview_html}</div>
+
+<div style="height:1px;background:var(--bd);margin:48px 56px;position:relative;z-index:10;"></div>
+
+<div class="graph-panel reveal">
+  <div class="graph-header">
+    <h2>Interactive Attack Graph</h2>
+    <div class="legend">
+      <span class="legend-item"><span class="dot" style="background:#FF4444"></span>Critical</span>
+      <span class="legend-item"><span class="dot" style="background:#FF8800"></span>High</span>
+      <span class="legend-item"><span class="dot" style="background:#4285f4"></span>Principal</span>
+      <span class="legend-item"><span class="dot" style="background:#505050"></span>Role/Permission</span>
+      <span class="legend-item"><span class="dot" style="background:#FF4444;border-radius:0"></span>── Escalation Path</span>
+    </div>
   </div>
-  <canvas id="graph-canvas"></canvas>
-  <div class="graph-hint">Drag canvas to pan &nbsp;|&nbsp; Scroll to zoom &nbsp;|&nbsp; Drag a node to move it &nbsp;|&nbsp; Hover for details</div>
+  <canvas id="graph-canvas" height="420"></canvas>
 </div>
 
-<div class="grid-3" style="grid-template-columns:1.3fr 1fr">{mitre_html}{critical_list_html}</div>
+<div style="height:48px;position:relative;z-index:10;"></div>
 
-<div style="margin-bottom:.75rem"><h2 style="font-size:.95rem;color:#f1f5f9">Blast Radius Overview</h2></div>
-{overview_html}
-
-<div class="panel" style="margin-bottom:1.1rem">
-  <h2>🎯 All Findings ({len(findings)})</h2>
+<div class="full-table-panel reveal">
+  <h2 style="margin-bottom:16px">All Findings</h2>
   <table>
-    <tr><th>Severity</th><th>Finding</th><th>Principal</th><th>MITRE</th><th>Details</th></tr>
-    {findings_rows or '<tr><td colspan="5" style="color:#64748b">No findings.</td></tr>'}
+    <tr><th>Severity</th><th>Finding</th><th>Principal</th><th>MITRE</th><th>Description</th></tr>
+    {findings_rows or '<tr><td colspan="5" style="color:var(--w4);padding:24px">No findings.</td></tr>'}
   </table>
 </div>
 
-<div class="panel">
-  <h2>💥 Blast Radius</h2>
+<div style="height:24px;position:relative;z-index:10;"></div>
+
+<div class="full-table-panel reveal" style="margin-top:1px">
+  <h2 style="margin-bottom:16px">Blast Radius</h2>
   <table>
     <tr><th>Principal</th><th>Blast Radius</th><th>Can Reach</th></tr>
-    {blast_rows or '<tr><td colspan="3" style="color:#64748b">No data.</td></tr>'}
+    {blast_rows or '<tr><td colspan="3" style="color:var(--w4);padding:24px">No blast radius data.</td></tr>'}
   </table>
 </div>
 
-<script>{graph_script}</script>
+<div style="height:48px;position:relative;z-index:10;"></div>
+
+<footer>
+  Generated by <strong>CloudSentrix v2.0.0</strong> &nbsp;·&nbsp;
+  <a href="https://github.com/Talha-Imran-cloud/cloudsentrix" target="_blank">github.com/Talha-Imran-cloud/cloudsentrix</a>
+  &nbsp;·&nbsp; <a href="https://www.linkedin.com/in/talha-imran-583a44420" target="_blank">Talha Imran</a>
+</footer>
+
+<script>
+/* Trail */
+const canvas=document.getElementById('trail');
+const ctx=canvas.getContext('2d');
+function resize(){{canvas.width=window.innerWidth;canvas.height=window.innerHeight;}}
+resize();window.addEventListener('resize',resize);
+const pts=[];
+document.addEventListener('mousemove',e=>{{
+  pts.push({{x:e.clientX,y:e.clientY,t:Date.now()}});
+  document.getElementById('cur').style.left=e.clientX+'px';
+  document.getElementById('cur').style.top=e.clientY+'px';
+}});
+(function draw(){{
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  const now=Date.now();
+  while(pts.length>0&&now-pts[0].t>600)pts.shift();
+  if(pts.length>1){{
+    for(let i=1;i<pts.length;i++){{
+      const prog=i/pts.length,alpha=prog*0.3,w=prog*2;
+      ctx.beginPath();ctx.moveTo(pts[i-1].x,pts[i-1].y);ctx.lineTo(pts[i].x,pts[i].y);
+      ctx.strokeStyle=`rgba(220,220,220,${{alpha}})`;ctx.lineWidth=w;ctx.lineCap='round';ctx.stroke();
+    }}
+  }}
+  requestAnimationFrame(draw);
+}})();
+
+/* Particles */
+(function(){{
+  const p=document.getElementById('particles');
+  for(let i=0;i<16;i++){{
+    const el=document.createElement('div');el.className='particle';
+    const s=Math.random()*3+1.5;
+    el.style.cssText=`width:${{s}}px;height:${{s}}px;background:#888;left:${{Math.random()*100}}%;animation-duration:${{Math.random()*20+15}}s;animation-delay:-${{Math.random()*15}}s;`;
+    p.appendChild(el);
+  }}
+}})();
+
+/* Scroll reveal */
+const obs=new IntersectionObserver(e=>{{e.forEach(x=>{{if(x.isIntersecting){{x.target.classList.add('visible');obs.unobserve(x.target);}}}});}},{{threshold:.1}});
+document.querySelectorAll('.reveal').forEach(el=>obs.observe(el));
+
+/* Graph */
+{graph_script}
+</script>
 </body>
 </html>"""
 
@@ -1301,7 +1492,7 @@ def render_banner(writer: OutputWriter) -> None:
 
     title_lines = [
         f"CloudSentrix v{__version__}",
-        "GCP IAM Privilege-Escalation Attack-Path Analyzer",
+        "Multi-Cloud IAM Security Analyzer — GCP · AWS · Azure · K8s · Terraform",
     ]
     width = max(len(line) for line in title_lines) + 4
     writer.print(f"[bold cyan]{'╔' + '═' * width + '╗'}[/bold cyan]")
