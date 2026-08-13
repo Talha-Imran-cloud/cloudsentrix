@@ -50,7 +50,7 @@ dev = [
 ]
 
 [project.scripts]
-cloudsentrix = "cloudsentrix.cli:main"
+cloudsentrix = "cloudsentrix._entry:main"
 
 [project.urls]
 Homepage = "https://cloudsentrix.netlify.app/"
@@ -64,13 +64,6 @@ where = ["src"]
 [tool.setuptools.package-dir]
 "" = "src"
 
-[tool.setuptools.package-data]
-"cloudsentrix" = ["*.json", "sample_data/*"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-
-[tool.coverage.run]
-source = ["src"]
-omit = ["tests/*"]
