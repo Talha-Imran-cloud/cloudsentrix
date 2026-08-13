@@ -1,0 +1,2870 @@
+"""
+CloudSentrix CLI
+===================
+The command-line entry point that wires every engine module (parser,
+graph, detection, risk scoring, blast radius) into a set of commands
+with colored terminal output and CI-friendly exit codes.
+
+Commands:
+    scan            Full pipeline scan: findings + risk score + blast radius
+    blast-radius    Blast radius for one specific principal
+    rules           List every detection rule the engine checks for
+    list-principals Quick inventory: every principal and the roles it holds
+    validate        Check a file is a well-formed GCP IAM policy export
+    score           Print only the overall security score (CI/badge use)
+    compare         Compare two IAM exports and show what risk changed
+    principal-path  Show the escalation path (if any) from one principal to another
+    mitre-map       Map every finding onto the MITRE ATT&CK Cloud Matrix
+    remediate       Generate gcloud CLI commands that fix each finding
+    export          Export a scan's results to JSON, CSV, or HTML
+    watch           Monitor a file/folder and auto re-scan on every change
+
+Exit codes:
+    0 = command completed, no CRITICAL findings (or command has no findings concept)
+    1 = scan completed, at least one CRITICAL finding (fail a CI pipeline on this)
+    2 = the command could not be completed (bad file, bad JSON, unexpected error)
+
+    Per-command nuances on "1":
+        compare         -> 1 if the NEW file introduces a new CRITICAL finding
+        score           -> 1 if --min-score is given and the score falls below it
+        principal-path  -> 1 if an escalation path was found (0 if none, 2 if
+                            either principal doesn't exist in the graph)
+        watch           -> runs until Ctrl+C; exits 0 on a clean stop, 2 if the
+                            watched path doesn't exist
+"""
+
+from __future__ import annotations
+
+import os as _os
+import sys as _sys
+
+# Make src/ importable both when running directly and after pip install
+def _setup_path():
+    """Ensure all cloudsentrix modules are importable."""
+    # When installed via pip: modules are in cloudsentrix package
+    # When run directly from src/: modules are in same directory
+    _here = _os.path.dirname(_os.path.abspath(__file__))
+    if _here not in _sys.path:
+        _sys.path.insert(0, _here)
+    # Also try parent/src
+    _parent_src = _os.path.join(_os.path.dirname(_here), 'src')
+    if _os.path.isdir(_parent_src) and _parent_src not in _sys.path:
+        _sys.path.insert(0, _parent_src)
+
+_setup_path()
+
+import argparse
+import csv
+import json
+import logging
+import re
+import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable
+
+from rich.console import Console
+
+from parser import GCPIAMParser, IAMParserError, MemberType, ParsedIAMPolicy
+from graph import GraphBuildError, IAMGraph
+from detection import DetectionEngine, Finding, Severity
+from risk_score import RiskRating, RiskScore, RiskScorer
+from blast_radius import BlastRadiusCalculator, BlastRadiusResult
+from watch_handler import watch as watch_files
+from live_scanner import fetch_live_iam_policy, save_policy_to_file, LiveScanError
+from pdf_report import generate_pdf_report
+from ai_summary import generate_ai_summary, build_fallback_summary, AISummaryError
+
+# AWS support
+from aws_parser import AWSIAMParser, AWSParserError
+from aws_graph import AWSIAMGraph
+from aws_detection import AWSDetectionEngine, AWSFinding, summarize_aws_findings
+from aws_live_scanner import AWSLiveScanner, AWSLiveScanError
+
+# Azure support
+from azure_parser import parse_azure_file, AzureIAMData
+
+# Multi-cloud dashboard
+from multi_dashboard import generate_multi_dashboard
+
+# Notifications
+from notifier import send_notification
+
+# Multi-cloud PDF
+from multi_pdf_report import generate_multi_pdf
+
+# Azure AD / Entra ID
+from azure_ad_parser import parse_azure_ad_file, AzureADData
+from azure_ad_detection import run_azure_ad_detections, AzureADFinding, get_azure_ad_rules
+
+# AWS Blast Radius
+from aws_blast_radius import calculate_aws_blast_radius, AWSBlastResult
+
+# Cross-Cloud Attack Chain Detection
+from cross_cloud_detector import detect_cross_cloud_chains, CrossCloudFinding
+
+# Terraform Scanner
+from terraform_scanner import (scan_terraform_file, scan_terraform_directory, get_terraform_rules, TerraformFinding,
+    scan_tfstate_file, get_tfstate_rules, TfstateFinding)
+from k8s_scanner import scan_k8s_file, scan_k8s_directory, get_k8s_rules, K8sFinding
+from azure_detection import run_azure_detections, AzureFinding, get_azure_rules
+from azure_risk_score import score_azure, AzureScoreResult
+from azure_blast_radius import calculate_azure_blast_radius
+from azure_exporter import export_azure
+from azure_live_scanner import fetch_azure_live
+
+logger = logging.getLogger(__name__)
+
+__version__ = "2.0.0"
+
+SEVERITY_CHOICES: dict[str, Severity] = {
+    "all": Severity.LOW,
+    "low": Severity.LOW,
+    "medium": Severity.MEDIUM,
+    "high": Severity.HIGH,
+    "critical": Severity.CRITICAL,
+}
+
+SEVERITY_COLOR: dict[Severity, str] = {
+    Severity.CRITICAL: "bold red",
+    Severity.HIGH: "bold yellow",
+    Severity.MEDIUM: "yellow",
+    Severity.LOW: "dim white",
+}
+
+RATING_COLOR: dict[RiskRating, str] = {
+    RiskRating.EXCELLENT: "bold green",
+    RiskRating.GOOD: "green",
+    RiskRating.FAIR: "yellow",
+    RiskRating.POOR: "bold yellow",
+    RiskRating.CRITICAL: "bold red",
+}
+
+CLOUD_LOGO = (
+    "       .--.    \n"
+    "    .-(    ).  \n"
+    "   (___.__)__) "
+)
+
+# Placeholder used in generated `remediate` commands when the user doesn't
+# pass --project. Left deliberately obvious so nobody accidentally runs it.
+DEFAULT_PROJECT_PLACEHOLDER = "YOUR_PROJECT_ID"
+
+
+# ---------------------------------------------------------------------------
+# Output layer — a thin wrapper around rich.Console
+# ---------------------------------------------------------------------------
+
+_MARKUP_RE = re.compile(r"\[(/?[a-z#/@][^\[\]]*)\]")
+
+
+class OutputWriter:
+    """Wraps rich.Console so the rest of the CLI never talks to rich
+    directly. Also implements --no-color ourselves (stripping markup
+    tags) so behavior doesn't depend on a specific Console constructor flag.
+    """
+
+    def __init__(self, console: Console, use_color: bool = True) -> None:
+        self._console = console
+        self._use_color = use_color
+
+    def print(self, text: str = "") -> None:
+        self._console.print(text if self._use_color else _MARKUP_RE.sub("", text))
+
+
+# ---------------------------------------------------------------------------
+# Core logic — no printing here, so it's directly unit-testable
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ScanResult:
+    source_file: str
+    cloud: str
+    policy: ParsedIAMPolicy
+    graph: IAMGraph
+    findings: list[Finding]
+    risk: RiskScore
+    blast_radius: list[BlastRadiusResult]
+    escalation_edges: list[tuple[str, str, str]]
+    # Azure-specific fields (None for GCP/AWS scans)
+    _az_findings: list = None  # type: ignore
+    _az_score: object = None
+    _az_blast: list = None     # type: ignore
+    _az_iam: object = None
+
+
+def run_scan(file_path: str, cloud: str = "gcp") -> ScanResult:
+    """Runs the full pipeline: parse -> graph -> detect -> score -> blast radius.
+
+    Raises:
+        ValueError: If `cloud` isn't a supported provider.
+        IAMParserError / AWSParserError: If the file can't be parsed.
+        GraphBuildError: If the graph can't be built from the parsed policy.
+    """
+    if cloud == "aws":
+        return _run_scan_aws(file_path)
+    if cloud == "azure":
+        return _run_scan_azure(file_path)
+    if cloud == "azure-ad":
+        return _run_scan_azure_ad(file_path)
+    if cloud != "gcp":
+        raise ValueError(f"Unsupported cloud provider: {cloud!r}. Supported: 'gcp', 'aws', 'azure', 'azure-ad'.")
+
+    policy = GCPIAMParser().parse_file(file_path)
+    graph = IAMGraph.from_policy(policy)
+    findings = DetectionEngine().run(graph)
+    risk = RiskScorer().score(findings)
+    _calc = BlastRadiusCalculator(graph, findings)
+    blast_radius = _calc.calculate_all()
+    escalation_edges = _calc.escalation_edges()
+
+    return ScanResult(
+        source_file=file_path,
+        cloud=cloud,
+        policy=policy,
+        graph=graph,
+        findings=findings,
+        risk=risk,
+        blast_radius=blast_radius,
+        escalation_edges=escalation_edges,
+    )
+
+
+def _run_scan_aws(file_path: str) -> ScanResult:
+    """AWS scan pipeline: parse -> graph -> detect -> score -> blast radius."""
+    from detection import Severity as GCPSeverity  # reuse for RiskScorer
+
+    aws_policy = AWSIAMParser().parse_file(file_path)
+    aws_graph = AWSIAMGraph.from_policy(aws_policy)
+    aws_findings = AWSDetectionEngine().run(aws_graph)
+
+    # Convert AWSFindings -> GCP Finding shape so RiskScorer + renderers work unchanged
+    gcp_findings = _aws_findings_to_gcp(aws_findings)
+    risk = RiskScorer().score(gcp_findings)
+
+    # AWS Blast Radius
+    aws_blast = calculate_aws_blast_radius(aws_graph, aws_findings)
+
+    return ScanResult(
+        source_file=file_path,
+        cloud="aws",
+        policy=aws_policy,      # type: ignore[arg-type]
+        graph=aws_graph,        # type: ignore[arg-type]
+        findings=gcp_findings,
+        risk=risk,
+        blast_radius=aws_blast,  # type: ignore[arg-type]
+        escalation_edges=[],
+    )
+
+
+def _run_scan_azure(file_path: str) -> ScanResult:
+    """Azure scan pipeline: parse -> detect -> score -> blast radius."""
+    from detection import Finding as GCPFinding, Severity as GCPSeverity
+
+    iam = parse_azure_file(file_path)
+    az_findings = run_azure_detections(iam)
+    az_score = score_azure(az_findings, iam)
+    az_blast = calculate_azure_blast_radius(iam)
+
+    # Convert AzureFindings -> GCP Finding shape for RiskScorer + renderers
+    gcp_findings = _azure_findings_to_gcp(az_findings)
+    risk = RiskScorer().score(gcp_findings)
+
+    return ScanResult(
+        source_file=file_path,
+        cloud="azure",
+        policy=iam,           # type: ignore[arg-type]
+        graph=iam,            # type: ignore[arg-type]  renderers check cloud
+        findings=gcp_findings,
+        risk=risk,
+        blast_radius=[],
+        escalation_edges=[],
+        _az_findings=az_findings,
+        _az_score=az_score,
+        _az_blast=az_blast,
+        _az_iam=iam,
+    )
+
+
+def _run_scan_azure_ad(file_path: str) -> ScanResult:
+    """Azure AD scan pipeline: parse -> detect -> score."""
+    from detection import Finding as GCPFinding, Severity as GCPSeverity
+
+    ad_data  = parse_azure_ad_file(file_path)
+    ad_findings = run_azure_ad_detections(ad_data)
+
+    sev_map = {"CRITICAL": GCPSeverity.CRITICAL, "HIGH": GCPSeverity.HIGH,
+               "MEDIUM": GCPSeverity.MEDIUM, "LOW": GCPSeverity.LOW}
+    gcp_findings = []
+    for f in ad_findings:
+        gcp_findings.append(GCPFinding(
+            rule_id=f.rule_id, title=f.title,
+            severity=sev_map.get(f.severity, GCPSeverity.LOW),
+            principal_id=f.principal_name,
+            description=f.description,
+            mitre_technique_id=f.mitre_technique,
+            mitre_technique_name=f.mitre_tactic,
+            evidence=f.evidence,
+        ))
+    risk = RiskScorer().score(gcp_findings)
+    return ScanResult(
+        source_file=file_path, cloud="azure-ad",
+        policy=ad_data,   # type: ignore
+        graph=ad_data,    # type: ignore
+        findings=gcp_findings, risk=risk,
+        blast_radius=[], escalation_edges=[],
+    )
+
+
+def _azure_findings_to_gcp(az_findings: list[AzureFinding]) -> list[Finding]:
+    """Convert AzureFinding -> GCP Finding shape for shared renderers."""
+    from detection import Finding as GCPFinding, Severity as GCPSeverity
+    sev_map = {"CRITICAL": GCPSeverity.CRITICAL, "HIGH": GCPSeverity.HIGH,
+               "MEDIUM": GCPSeverity.MEDIUM, "LOW": GCPSeverity.LOW}
+    result = []
+    for f in az_findings:
+        result.append(GCPFinding(
+            rule_id=f.rule_id,
+            title=f.title,
+            severity=sev_map.get(f.severity, GCPSeverity.LOW),
+            principal_id=f.principal_name,
+            description=f.description,
+            mitre_technique_id=f.mitre_technique,
+            mitre_technique_name=f.mitre_tactic,
+            evidence=(f.role,),
+        ))
+    return result
+
+
+def _aws_findings_to_gcp(aws_findings: list[AWSFinding]) -> list[Finding]:
+    """Convert AWSFinding objects to GCP Finding shape.
+    Both dataclasses share the same fields — this is a straight mapping.
+    Severity IntEnum values are identical so we cast by value.
+    """
+    from detection import Finding as GCPFinding, Severity as GCPSeverity
+    result = []
+    for f in aws_findings:
+        result.append(GCPFinding(
+            rule_id=f.rule_id,
+            title=f.title,
+            severity=GCPSeverity(int(f.severity)),
+            principal_id=f.principal_id,
+            description=f.description,
+            mitre_technique_id=f.mitre_technique_id,
+            mitre_technique_name=f.mitre_technique_name,
+            evidence=f.evidence,
+        ))
+    return result
+
+
+def run_list_principals(file_path: str, cloud: str = "gcp") -> IAMGraph:
+    """Parses a file and builds its graph only — no detection, for a
+    lightweight inventory view."""
+    if cloud == "aws":
+        aws_policy = AWSIAMParser().parse_file(file_path)
+        return AWSIAMGraph.from_policy(aws_policy)  # type: ignore[return-value]
+    if cloud == "azure":
+        return parse_azure_file(file_path)  # type: ignore[return-value]
+    if cloud != "gcp":
+        raise ValueError(f"Unsupported cloud provider: {cloud!r}. Supported: 'gcp', 'aws', 'azure'.")
+    policy = GCPIAMParser().parse_file(file_path)
+    return IAMGraph.from_policy(policy)
+
+
+def filter_by_severity(findings: list[Finding], minimum: Severity) -> list[Finding]:
+    """Findings at or above `minimum` severity. DetectionEngine.run()
+    already returns findings sorted most-severe-first; filtering preserves
+    that order."""
+    return [f for f in findings if f.severity >= minimum]
+
+
+def determine_exit_code(findings: list[Finding]) -> int:
+    """1 if any CRITICAL finding exists (regardless of display filtering),
+    else 0. Evaluated against ALL findings, not just what was displayed,
+    so a --severity filter can never silently hide a failing exit code."""
+    return 1 if any(f.severity == Severity.CRITICAL for f in findings) else 0
+
+
+def find_blast_radius_for(results: list[BlastRadiusResult], principal_id: str) -> BlastRadiusResult | None:
+    """Looks up one principal's precomputed blast radius result, or None
+    if that principal isn't in the graph."""
+    return next((r for r in results if r.principal_id == principal_id), None)
+
+
+# -- validate -----------------------------------------------------------------
+
+def run_validate(file_path: str) -> tuple[ParsedIAMPolicy, list[str]]:
+    """Validates a GCP IAM policy file's structure ONLY — no graph, no
+    detection. Returns the parsed policy plus a list of non-fatal warning
+    messages (e.g. unrecognized member type prefixes, empty bindings).
+
+    Raises the same exceptions GCPIAMParser raises on genuinely malformed
+    input (missing 'bindings' key, invalid JSON, etc.) — those are fatal,
+    not warnings.
+    """
+    policy = GCPIAMParser().parse_file(file_path)
+    warnings: list[str] = []
+
+    if not policy.bindings:
+        warnings.append("Policy contains zero bindings — nothing to analyze.")
+
+    for i, binding in enumerate(policy.bindings):
+        if not binding.members:
+            warnings.append(f"bindings[{i}] ('{binding.role}') has no members.")
+        for member in binding.members:
+            if member.type == MemberType.UNKNOWN:
+                warnings.append(
+                    f"bindings[{i}] ('{binding.role}'): unrecognized member type in '{member.raw}'."
+                )
+
+    return policy, warnings
+
+
+# -- mitre-map ------------------------------------------------------------------
+
+def group_findings_by_mitre(findings: list[Finding]) -> dict[str, list[Finding]]:
+    """Groups findings by MITRE technique id, e.g. 'T1098.001' -> [Finding, ...]."""
+    grouped: dict[str, list[Finding]] = {}
+    for f in findings:
+        grouped.setdefault(f.mitre_technique_id, []).append(f)
+    return grouped
+
+
+# -- compare --------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ComparisonResult:
+    old_file: str
+    new_file: str
+    new_findings: list[Finding]
+    resolved_findings: list[Finding]
+    persistent_findings: list[Finding]
+    old_score: RiskScore
+    new_score: RiskScore
+
+
+def _finding_key(f: Finding) -> tuple[str, str]:
+    """Identifies 'the same risk' across two scans: same rule, same
+    principal. (Wording of `description`/`evidence` can shift slightly
+    between scans without this being a genuinely new or resolved risk.)"""
+    return (f.rule_id, f.principal_id)
+
+
+def run_compare(old_file: str, new_file: str, cloud: str = "gcp") -> ComparisonResult:
+    """Scans two IAM policy exports and classifies every finding as new,
+    resolved, or persistent between them."""
+    old_result = run_scan(old_file, cloud=cloud)
+    new_result = run_scan(new_file, cloud=cloud)
+
+    old_by_key = {_finding_key(f): f for f in old_result.findings}
+    new_by_key = {_finding_key(f): f for f in new_result.findings}
+
+    new_findings = [f for k, f in new_by_key.items() if k not in old_by_key]
+    resolved_findings = [f for k, f in old_by_key.items() if k not in new_by_key]
+    persistent_findings = [f for k, f in new_by_key.items() if k in old_by_key]
+
+    # dict iteration order isn't severity order — sort explicitly, same
+    # convention as DetectionEngine.run() (most-severe-first).
+    new_findings.sort(key=lambda f: f.severity, reverse=True)
+    resolved_findings.sort(key=lambda f: f.severity, reverse=True)
+    persistent_findings.sort(key=lambda f: f.severity, reverse=True)
+
+    return ComparisonResult(
+        old_file=old_file,
+        new_file=new_file,
+        new_findings=new_findings,
+        resolved_findings=resolved_findings,
+        persistent_findings=persistent_findings,
+        old_score=old_result.risk,
+        new_score=new_result.risk,
+    )
+
+
+# -- principal-path -------------------------------------------------------------
+
+def run_principal_path(
+    file_path: str, source: str, target: str, cloud: str = "gcp"
+) -> tuple[ScanResult, list[str] | None]:
+    """Runs the full scan, then asks the blast-radius escalation graph for
+    the shortest privilege-escalation path from source to target."""
+    result = run_scan(file_path, cloud=cloud)
+    calculator = BlastRadiusCalculator(result.graph, result.findings)
+    path = calculator.find_path(source, target)
+    return result, path
+
+
+# -- remediate --------------------------------------------------------------------
+
+_MEMBER_TYPE_PREFIX: dict[MemberType, str] = {
+    MemberType.USER: "user:",
+    MemberType.SERVICE_ACCOUNT: "serviceAccount:",
+    MemberType.GROUP: "group:",
+    MemberType.DOMAIN: "domain:",
+    MemberType.ALL_USERS: "",
+    MemberType.ALL_AUTHENTICATED_USERS: "",
+}
+
+
+def _gcloud_member(principal_id: str, graph: IAMGraph) -> str:
+    """Builds the '--member' value gcloud expects (e.g. 'user:a@b.com'),
+    from a bare principal id, using the graph to look up its member type."""
+    principal = graph.get_principal(principal_id)
+    if principal is None:
+        return principal_id
+    prefix = _MEMBER_TYPE_PREFIX.get(principal.member_type, "")
+    return f"{prefix}{principal_id}"
+
+
+def _remediate_gcp_001(finding: Finding, graph: IAMGraph, project: str) -> list[str]:
+    member = _gcloud_member(finding.principal_id, graph)
+    return [
+        f'gcloud projects remove-iam-policy-binding {project} --member="{member}" --role="{role}"'
+        for role in finding.evidence
+    ]
+
+
+def _remediate_gcp_002(finding: Finding, graph: IAMGraph, project: str) -> list[str]:
+    member = _gcloud_member(finding.principal_id, graph)
+    role = finding.evidence[0] if finding.evidence else "roles/iam.serviceAccountTokenCreator"
+    return [
+        f'gcloud projects remove-iam-policy-binding {project} --member="{member}" --role="{role}"',
+        "# If this access is genuinely needed, re-grant it scoped to ONE service account instead:",
+        f'# gcloud iam service-accounts add-iam-policy-binding TARGET_SA@{project}.iam.gserviceaccount.com \\',
+        f'#     --member="{member}" --role="roles/iam.serviceAccountTokenCreator"',
+    ]
+
+
+def _remediate_gcp_003(finding: Finding, graph: IAMGraph, project: str) -> list[str]:
+    member = _gcloud_member(finding.principal_id, graph)
+    role = finding.evidence[0] if finding.evidence else "roles/iam.serviceAccountKeyAdmin"
+    return [
+        f'gcloud projects remove-iam-policy-binding {project} --member="{member}" --role="{role}"',
+        "# Also audit and rotate/delete any long-lived keys this principal may already have created:",
+        "# gcloud iam service-accounts keys list --iam-account=TARGET_SA@PROJECT_ID.iam.gserviceaccount.com",
+    ]
+
+
+def _remediate_gcp_004(finding: Finding, graph: IAMGraph, project: str) -> list[str]:
+    member = _gcloud_member(finding.principal_id, graph)
+    role = finding.evidence[0] if finding.evidence else "roles/owner"
+    return [
+        f"# '{finding.principal_id}' can modify IAM policy directly — confirm it truly needs '{role}'.",
+        f'gcloud projects remove-iam-policy-binding {project} --member="{member}" --role="{role}"',
+        "# Consider a narrower role instead of Owner, e.g.:",
+        f'# gcloud projects add-iam-policy-binding {project} --member="{member}" \\',
+        '#     --role="roles/resourcemanager.projectIamAdmin"',
+    ]
+
+
+def _remediate_gcp_005(finding: Finding, graph: IAMGraph, project: str) -> list[str]:
+    member = _gcloud_member(finding.principal_id, graph)
+    return [
+        f'gcloud projects remove-iam-policy-binding {project} --member="{member}" --role="roles/iam.serviceAccountUser"',
+        "# If resource-attach access is required, scope it to ONE specific service account instead:",
+        f'# gcloud iam service-accounts add-iam-policy-binding TARGET_SA@{project}.iam.gserviceaccount.com \\',
+        f'#     --member="{member}" --role="roles/iam.serviceAccountUser"',
+    ]
+
+
+REMEDIATION_GENERATORS: dict[str, Callable[[Finding, IAMGraph, str], list[str]]] = {
+    "GCP-001": _remediate_gcp_001,
+    "GCP-002": _remediate_gcp_002,
+    "GCP-003": _remediate_gcp_003,
+    "GCP-004": _remediate_gcp_004,
+    "GCP-005": _remediate_gcp_005,
+}
+
+
+def generate_remediation(finding: Finding, graph: IAMGraph, project: str) -> list[str]:
+    """Returns one or more gcloud CLI command lines (some may be '#'
+    comments with guidance) that address the given finding. Falls back to
+    a generic manual-review note for any rule_id without a specific
+    generator, so a new detection rule never crashes this command."""
+    generator = REMEDIATION_GENERATORS.get(finding.rule_id)
+    if generator is None:
+        return [f"# No automated fix available for {finding.rule_id} — review '{finding.principal_id}' manually."]
+    return generator(finding, graph, project)
+
+
+# -- export -----------------------------------------------------------------------
+
+def finding_to_dict(f: Finding) -> dict:
+    return {
+        "rule_id": f.rule_id,
+        "title": f.title,
+        "severity": f.severity.name,
+        "principal_id": f.principal_id,
+        "description": f.description,
+        "mitre_technique_id": f.mitre_technique_id,
+        "mitre_technique_name": f.mitre_technique_name,
+        "evidence": list(f.evidence),
+    }
+
+
+def blast_radius_to_dict(r: BlastRadiusResult) -> dict:
+    return {
+        "principal_id": r.principal_id,
+        "percentage": r.percentage,
+        "total_others": getattr(r, "total_others", getattr(r, "total_principals", 0)),
+        "reachable_principals": list(r.reachable_principals),
+    }
+
+
+def scan_result_to_dict(result: ScanResult) -> dict:
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source_file": result.source_file,
+        "cloud": result.cloud,
+        "risk_score": {
+            "score": result.risk.score,
+            "rating": result.risk.rating.value,
+            "finding_counts": result.risk.finding_counts,
+            "penalty_breakdown": result.risk.penalty_breakdown,
+        },
+        "findings": [finding_to_dict(f) for f in result.findings],
+        "blast_radius": [blast_radius_to_dict(r) for r in result.blast_radius],
+    }
+
+
+def export_json(result: ScanResult, output_path: Path) -> None:
+    output_path.write_text(json.dumps(scan_result_to_dict(result), indent=2), encoding="utf-8")
+
+
+def export_csv(result: ScanResult, output_path: Path) -> None:
+    with output_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow([
+            "rule_id", "title", "severity", "principal_id",
+            "description", "mitre_technique_id", "mitre_technique_name", "evidence",
+        ])
+        for f in result.findings:
+            writer.writerow([
+                f.rule_id, f.title, f.severity.name, f.principal_id,
+                f.description, f.mitre_technique_id, f.mitre_technique_name,
+                "; ".join(f.evidence),
+            ])
+
+
+_HTML_SEVERITY_COLOR: dict[str, str] = {
+    "CRITICAL": "#dc2626",
+    "HIGH": "#ea580c",
+    "MEDIUM": "#ca8a04",
+    "LOW": "#6b7280",
+}
+
+
+def _html_escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def export_html(result: ScanResult, output_path: Path) -> None:
+    output_path.write_text(build_html_export(result), encoding="utf-8")
+
+
+def export_sarif(result: ScanResult, output_path: Path) -> None:
+    """Exports findings as SARIF 2.1.0 — compatible with GitHub Code Scanning,
+    VS Code SARIF Viewer, and any SARIF-aware security tool."""
+    rules = []
+    results = []
+    seen_rules = {}
+
+    for f in result.findings:
+        if f.rule_id not in seen_rules:
+            seen_rules[f.rule_id] = True
+            rules.append({
+                "id": f.rule_id,
+                "name": f.title.replace(" ", ""),
+                "shortDescription": {"text": f.title},
+                "fullDescription": {"text": f.description},
+                "helpUri": f"https://attack.mitre.org/techniques/{f.mitre_technique_id.replace('.', '/')}/",
+                "properties": {
+                    "tags": ["security", "gcp", "iam", f.mitre_technique_id],
+                    "precision": "high",
+                    "problem.severity": f.severity.name.lower(),
+                },
+            })
+        level = {"CRITICAL": "error", "HIGH": "error", "MEDIUM": "warning", "LOW": "note"}.get(f.severity.name, "note")
+        results.append({
+            "ruleId": f.rule_id,
+            "level": level,
+            "message": {"text": f.description},
+            "locations": [{"logicalLocations": [{"name": f.principal_id, "kind": "gcp/iam/principal"}]}],
+            "properties": {
+                "severity": f.severity.name,
+                "mitre": f"{f.mitre_technique_id} — {f.mitre_technique_name}",
+                "evidence": list(f.evidence),
+            },
+        })
+
+    sarif = {
+        "$schema": "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0-rtm.5.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {
+                "driver": {
+                    "name": "CloudSentrix",
+                    "version": __version__,
+                    "informationUri": "https://github.com/Talha-Imran-cloud/cloudsentrix",
+                    "rules": rules,
+                }
+            },
+            "results": results,
+            "properties": {
+                "securityScore": result.risk.score,
+                "securityRating": result.risk.rating.value,
+                "sourceFile": result.source_file,
+            },
+        }],
+    }
+    output_path.write_text(json.dumps(sarif, indent=2), encoding="utf-8")
+
+
+_EXPORT_EXTENSION_FORMAT: dict[str, str] = {".json": "json", ".csv": "csv", ".html": "html", ".htm": "html", ".sarif": "sarif"}
+_EXPORTERS: dict[str, Callable[[ScanResult, Path], None]] = {
+    "json": export_json,
+    "csv": export_csv,
+    "html": export_html,
+    "sarif": export_sarif,
+}
+
+
+def _member_prefix(principal_id: str) -> str:
+    """Returns the GCP member type prefix for a principal id string.
+    Service accounts contain '.iam.gserviceaccount.com', everything else is user."""
+    if principal_id.endswith(".iam.gserviceaccount.com"):
+        return "serviceAccount"
+    return "user"
+
+
+def build_remediation_command(finding: Finding) -> str:
+    """Returns a single gcloud CLI string for a finding (used in JSON export).
+    For multi-line remediation, use generate_remediation() instead."""
+    from graph import IAMGraph  # local import — avoid circular at module level
+    lines = REMEDIATION_GENERATORS.get(finding.rule_id, lambda f, g, p: [
+        f"# No automated fix for {finding.rule_id} — review '{finding.principal_id}' manually."
+    ])(finding, _EmptyGraph(), DEFAULT_PROJECT_PLACEHOLDER)
+    return " && ".join(l for l in lines if not l.startswith("#")) or lines[0]
+
+
+class _EmptyGraph:
+    """Minimal stub so build_remediation_command works without a real graph."""
+    def get_principal(self, _): return None
+
+
+def build_json_export(result: "ScanResult") -> dict:
+    """Returns a JSON-serializable dict of the full scan result, suitable
+    for saving to a .json file or embedding in tests."""
+    findings_with_remediation = []
+    for f in result.findings:
+        d = finding_to_dict(f)
+        d["remediation"] = build_remediation_command(f)
+        findings_with_remediation.append(d)
+
+    return {
+        "cloudsentrix_version": __version__,
+        "scanned_at": datetime.now(timezone.utc).isoformat(),
+        "source_file": result.source_file,
+        "cloud": result.cloud,
+        "summary": {
+            "score": result.risk.score,
+            "rating": result.risk.rating.value,
+            "finding_counts": result.risk.finding_counts,
+            "penalty_breakdown": result.risk.penalty_breakdown,
+        },
+        "findings": findings_with_remediation,
+        "blast_radius": [blast_radius_to_dict(r) for r in result.blast_radius],
+    }
+
+
+RULE_CATEGORY: dict[str, str] = {
+    # GCP rules
+    "GCP-001": "Public Access",
+    "GCP-002": "Service Account Risks",
+    "GCP-003": "Service Account Risks",
+    "GCP-004": "Overly Permissive Roles",
+    "GCP-005": "Privilege Escalation",
+    # AWS rules
+    "AWS-001": "Overly Permissive Roles",
+    "AWS-002": "Privilege Escalation",
+    "AWS-003": "Privilege Escalation",
+    "AWS-004": "Public Access",
+    "AWS-005": "Credential Risks",
+    "AWS-006": "Backdoor Creation",
+    "AWS-007": "Overly Permissive Roles",
+    # Azure RBAC rules
+    "AZ-001": "Overly Permissive Roles",
+    "AZ-002": "Service Principal Risks",
+    "AZ-003": "Guest Access Risks",
+    "AZ-004": "Privilege Escalation",
+    "AZ-005": "Custom Role Risks",
+    # Azure AD rules
+    "AZAD-001": "Dangerous OAuth Permission",
+    "AZAD-002": "Orphaned App Registration",
+    "AZAD-003": "Multi-Tenant App Risk",
+    "AZAD-004": "Expired Credentials",
+    "AZAD-005": "No-Expiry Credentials",
+    "AZAD-006": "High-Privilege Service Principal",
+}
+
+CATEGORY_COLOR: dict[str, str] = {
+    "Privilege Escalation": "#dc2626",
+    "Overly Permissive Roles": "#ea580c",
+    "Service Account Risks": "#ca8a04",
+    "Public Access": "#3b82f6",
+}
+
+SEVERITY_HEX: dict[str, str] = {
+    "CRITICAL": "#dc2626", "HIGH": "#ea580c", "MEDIUM": "#ca8a04", "LOW": "#22c55e",
+}
+
+DASHBOARD_CSS = """
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#0b1120;color:#e2e8f0;padding:1.75rem;min-height:100vh}
+.header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.5rem;flex-wrap:wrap;gap:.75rem}
+.header h1{font-size:1.55rem;font-weight:700;color:#f8fafc}
+.header .meta{color:#64748b;font-size:.82rem;margin-top:.25rem}
+
+.score-row{display:grid;grid-template-columns:1.4fr repeat(5,1fr);gap:1rem;margin-bottom:1.25rem}
+.score-card{background:#141b2d;border-radius:10px;padding:1.1rem 1.2rem;border:1px solid #23304a}
+.score-card .label{font-size:.72rem;color:#64748b;text-transform:uppercase;letter-spacing:.05em;display:flex;align-items:center;gap:.4rem}
+.score-card .value{font-size:1.75rem;font-weight:700;margin-top:.35rem;line-height:1}
+.score-card .sub{font-size:.76rem;color:#94a3b8;margin-top:.3rem}
+.score-bar-bg{background:#1e293b;border-radius:4px;height:6px;margin-top:.6rem;overflow:hidden}
+.score-bar-fill{height:100%;border-radius:4px}
+
+.grid-3{display:grid;grid-template-columns:1fr 1.3fr 1.3fr;gap:1.1rem;margin-bottom:1.1rem}
+.panel{background:#141b2d;border-radius:10px;padding:1.15rem 1.25rem;border:1px solid #23304a}
+.panel h2{font-size:.95rem;font-weight:600;color:#f1f5f9;margin-bottom:1rem}
+
+.donut-wrap{display:flex;align-items:center;gap:1.3rem}
+.donut{width:130px;height:130px;border-radius:50%;position:relative;flex-shrink:0}
+.donut::after{content:"";position:absolute;inset:20px;background:#141b2d;border-radius:50%;
+  display:flex;align-items:center;justify-content:center}
+.donut-center{position:absolute;inset:20px;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;text-align:center}
+.donut-center .n{font-size:1.5rem;font-weight:700}
+.donut-center .t{font-size:.62rem;color:#64748b;text-transform:uppercase}
+.donut-legend{display:flex;flex-direction:column;gap:.5rem}
+.donut-legend-item{display:flex;align-items:center;gap:.5rem;font-size:.8rem}
+.donut-legend-item .dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.donut-legend-item .pct{margin-left:auto;color:#64748b;font-size:.74rem}
+
+.cat-row{display:flex;align-items:center;gap:.7rem;margin-bottom:.7rem;font-size:.8rem}
+.cat-row .cat-label{width:150px;flex-shrink:0;color:#cbd5e1}
+.cat-bar-bg{flex:1;background:#1e293b;border-radius:4px;height:9px;overflow:hidden}
+.cat-bar-fill{height:100%;border-radius:4px}
+.cat-count{width:24px;text-align:right;color:#94a3b8;font-weight:600}
+
+.risky-row{display:flex;justify-content:space-between;align-items:center;padding:.55rem 0;
+  border-bottom:1px solid #1e293b;font-size:.8rem}
+.risky-row:last-child{border-bottom:none}
+.risky-id{color:#cbd5e1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-right:.6rem}
+.badge{color:#fff;padding:.18rem .55rem;border-radius:.3rem;font-size:.68rem;font-weight:700;white-space:nowrap;flex-shrink:0}
+
+.legend{display:flex;gap:1.2rem;margin-bottom:.75rem;flex-wrap:wrap}
+.legend-item{display:flex;align-items:center;gap:.4rem;font-size:.78rem;color:#94a3b8}
+.dot{width:11px;height:11px;border-radius:50%;display:inline-block}
+#graph-canvas{width:100%;height:440px;background:#0b1120;border-radius:6px;display:block;cursor:grab}
+#graph-canvas:active{cursor:grabbing}
+.graph-hint{font-size:.72rem;color:#475569;margin-top:.5rem}
+
+table{width:100%;border-collapse:collapse}
+th{text-align:left;padding:.5rem .75rem;font-size:.7rem;color:#64748b;text-transform:uppercase;border-bottom:1px solid #23304a}
+td{padding:.55rem .75rem;font-size:.81rem;border-bottom:1px solid #1a2540;vertical-align:top}
+tr:hover td{background:#182135}
+small{color:#64748b;display:block;margin-top:.1rem}
+
+.overview-row{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:1.1rem}
+.overview-card{background:#141b2d;border:1px solid #23304a;border-radius:10px;padding:1rem 1.1rem;
+  display:flex;align-items:center;gap:.8rem}
+.overview-icon{font-size:1.5rem}
+.overview-card .n{font-size:1.3rem;font-weight:700}
+.overview-card .t{font-size:.72rem;color:#94a3b8}
+
+.crit-list{list-style:none}
+.crit-item{display:flex;align-items:center;gap:.6rem;padding:.55rem 0;border-bottom:1px solid #1e293b;font-size:.82rem}
+.crit-item:last-child{border-bottom:none}
+.crit-dot{width:8px;height:8px;border-radius:50%;background:#dc2626;flex-shrink:0}
+.crit-text{flex:1;color:#e2e8f0}
+.crit-principal{color:#64748b;font-size:.74rem}
+"""
+
+
+def build_html_export(result: "ScanResult") -> str:
+    import json as _json
+    from collections import Counter
+
+    findings = result.findings
+    risk = result.risk
+    graph = result.graph
+    sev_counts = risk.finding_counts
+    total = max(len(findings), 1)
+
+    # -- attack graph data (canvas) — same logic as before, unchanged --------
+    nodes, edges = [], []
+    for pid in graph.principal_ids():
+        p = graph.get_principal(pid)
+        is_critical = any(f.principal_id == pid and f.severity.name == "CRITICAL" for f in findings)
+        is_high = any(f.principal_id == pid and f.severity.name == "HIGH" for f in findings)
+        color = "#dc2626" if is_critical else "#ea580c" if is_high else "#3b82f6"
+        nodes.append({"id": pid, "label": pid.split("@")[0], "title": pid, "color": color, "shape": "ellipse"})
+    # GCP graph has role_ids()/roles_of() — AWS graph has permission_ids()/permissions_of()
+    _is_aws = hasattr(graph, "permission_ids")
+    if _is_aws:
+        for perm in graph.permission_ids():
+            short = perm.replace("managed-policy:arn:aws:iam::aws:policy/", "policy/")
+            short = short.replace("managed-policy:", "")[:40]
+            nodes.append({"id": perm, "label": short, "title": perm, "color": "#475569", "shape": "box"})
+        for pid in graph.principal_ids():
+            for perm in graph.permissions_of(pid):
+                edges.append({"from": pid, "to": perm, "color": "#475569", "dashes": False, "label": ""})
+    else:
+        for rid in graph.role_ids():
+            nodes.append({"id": rid, "label": rid.replace("roles/", ""), "title": rid, "color": "#475569", "shape": "box"})
+        for pid in graph.principal_ids():
+            for role in graph.roles_of(pid):
+                edges.append({"from": pid, "to": role, "color": "#475569", "dashes": False, "label": ""})
+    for src, tgt, rule_id in result.escalation_edges:
+        edges.append({"from": src, "to": tgt, "color": "#dc2626", "dashes": True, "label": rule_id})
+    graph_data = _json.dumps({"nodes": nodes, "edges": edges})
+
+    # -- score cards row -------------------------------------------------------
+    rating_color = {"Excellent": "#22c55e", "Good": "#22c55e", "Fair": "#ca8a04",
+                     "Poor": "#ea580c", "Critical": "#dc2626"}.get(risk.rating.value, "#f59e0b")
+
+    def _mini_card(label: str, value, color: str, sub: str) -> str:
+        return (f'<div class="score-card"><div class="label">{label}</div>'
+                f'<div class="value" style="color:{color}">{value}</div>'
+                f'<div class="sub">{sub}</div></div>')
+
+    score_cards = (
+        f'<div class="score-card"><div class="label">🛡️ Security Score</div>'
+        f'<div class="value" style="color:{rating_color}">{risk.score}/100</div>'
+        f'<div class="sub">{risk.rating.value}</div>'
+        f'<div class="score-bar-bg"><div class="score-bar-fill" '
+        f'style="width:{risk.score}%;background:{rating_color}"></div></div></div>'
+        + _mini_card("📋 Total Findings", len(findings), "#60a5fa", "Across all severity levels")
+        + _mini_card("🔴 Critical", sev_counts.get("CRITICAL", 0), SEVERITY_HEX["CRITICAL"],
+                     f"{round(sev_counts.get('CRITICAL', 0) / total * 100)}% of findings")
+        + _mini_card("🟠 High", sev_counts.get("HIGH", 0), SEVERITY_HEX["HIGH"],
+                     f"{round(sev_counts.get('HIGH', 0) / total * 100)}% of findings")
+        + _mini_card("🟡 Medium", sev_counts.get("MEDIUM", 0), SEVERITY_HEX["MEDIUM"],
+                     f"{round(sev_counts.get('MEDIUM', 0) / total * 100)}% of findings")
+        + _mini_card("🟢 Low", sev_counts.get("LOW", 0), SEVERITY_HEX["LOW"],
+                     f"{round(sev_counts.get('LOW', 0) / total * 100)}% of findings")
+    )
+
+    # -- donut chart (findings by severity) -------------------------------------
+    order = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
+    cum = 0.0
+    stops = []
+    for sev in order:
+        cnt = sev_counts.get(sev, 0)
+        if cnt == 0:
+            continue
+        start = cum
+        cum += (cnt / total) * 100
+        stops.append(f"{SEVERITY_HEX[sev]} {start:.2f}% {cum:.2f}%")
+    gradient = ", ".join(stops) if stops else "#1e293b 0% 100%"
+
+    donut_legend = "".join(
+        f'<div class="donut-legend-item"><span class="dot" style="background:{SEVERITY_HEX[sev]}"></span>'
+        f'{sev.title()}<span class="pct">{sev_counts.get(sev, 0)} ({round(sev_counts.get(sev, 0) / total * 100)}%)</span></div>'
+        for sev in order
+    )
+
+    donut_html = (
+        '<div class="panel"><h2>Findings by Severity</h2><div class="donut-wrap">'
+        f'<div class="donut" style="background:conic-gradient({gradient})">'
+        f'<div class="donut-center"><div class="n">{len(findings)}</div><div class="t">Total</div></div>'
+        '</div>'
+        f'<div class="donut-legend">{donut_legend}</div>'
+        '</div></div>'
+    )
+
+    # -- findings by category (bars) ---------------------------------------------
+    cat_counts: Counter = Counter(RULE_CATEGORY.get(f.rule_id, "Other") for f in findings)
+    max_cat = max(cat_counts.values(), default=1)
+    cat_rows = "".join(
+        f'<div class="cat-row"><span class="cat-label">{_html_escape(cat)}</span>'
+        f'<div class="cat-bar-bg"><div class="cat-bar-fill" style="width:{cnt / max_cat * 100:.0f}%;'
+        f'background:{CATEGORY_COLOR.get(cat, "#64748b")}"></div></div>'
+        f'<span class="cat-count">{cnt}</span></div>'
+        for cat, cnt in cat_counts.most_common()
+    )
+    _no_findings_html = "<p style='color:#64748b;font-size:.8rem'>No findings.</p>"
+    category_html = f'<div class="panel"><h2>Findings by Category</h2>{cat_rows or _no_findings_html}</div>'
+
+    # -- top 5 risky principals -----------------------------------------------
+    worst_severity: dict[str, Severity] = {}
+    for f in findings:
+        cur = worst_severity.get(f.principal_id)
+        if cur is None or f.severity > cur:
+            worst_severity[f.principal_id] = f.severity
+    blast_by_id = {r.principal_id: r for r in result.blast_radius}
+    ranked = sorted(
+        worst_severity.items(),
+        key=lambda kv: (kv[1], blast_by_id[kv[0]].percentage if kv[0] in blast_by_id else 0),
+        reverse=True,
+    )[:5]
+    risky_rows = "".join(
+        f'<div class="risky-row"><span class="risky-id">{_html_escape(pid)}</span>'
+        f'<span class="badge" style="background:{SEVERITY_HEX.get(sev.name, "#64748b")}">{sev.name}</span></div>'
+        for pid, sev in ranked
+    )
+    top_risky_html = f'<div class="panel"><h2>Top 5 Risky Principals</h2>{risky_rows or _no_findings_html}</div>'
+
+    # -- MITRE ATT&CK mapping table -----------------------------------------------
+    mitre_counts: Counter = Counter()
+    mitre_names: dict[str, str] = {}
+    for f in findings:
+        mitre_counts[f.mitre_technique_id] += 1
+        mitre_names[f.mitre_technique_id] = f.mitre_technique_name
+    mitre_rows = "".join(
+        f'<tr><td>{_html_escape(mitre_names[tid])}</td><td><code>{tid}</code></td>'
+        f'<td style="text-align:right;font-weight:700">{cnt}</td></tr>'
+        for tid, cnt in mitre_counts.most_common()
+    )
+    mitre_html = (
+        '<div class="panel"><h2>MITRE ATT&CK Mapping</h2><table>'
+        '<tr><th>Technique</th><th>ID</th><th style="text-align:right">Count</th></tr>'
+        + (mitre_rows or '<tr><td colspan="3" style="color:#64748b">No findings.</td></tr>')
+        + '</table></div>'
+    )
+
+    # -- blast radius overview cards -----------------------------------------------
+    at_risk = [r for r in result.blast_radius if r.percentage > 0]
+    sa_at_risk = sum(
+        1 for r in at_risk
+        if (p := graph.get_principal(r.principal_id)) is not None and getattr(p, "member_type", None) is not None and p.member_type.value == "serviceAccount"
+    )
+    max_blast = max((r.percentage for r in result.blast_radius), default=0.0)
+    overview_html = (
+        '<div class="overview-row">'
+        f'<div class="overview-card"><span class="overview-icon">🧭</span><div><div class="n">{len(at_risk)}</div>'
+        '<div class="t">Principals at Risk</div></div></div>'
+        f'<div class="overview-card"><span class="overview-icon">🤖</span><div><div class="n">{sa_at_risk}</div>'
+        '<div class="t">Service Accounts at Risk</div></div></div>'
+        f'<div class="overview-card"><span class="overview-icon">🔗</span><div><div class="n">{len(result.escalation_edges)}</div>'
+        '<div class="t">Escalation Paths</div></div></div>'
+        f'<div class="overview-card"><span class="overview-icon">💥</span><div><div class="n">{max_blast:.0f}%</div>'
+        '<div class="t">Max Blast Radius</div></div></div>'
+        '</div>'
+    )
+
+    # -- recent critical/high findings list -----------------------------------------
+    top_findings = [f for f in findings if f.severity.name in ("CRITICAL", "HIGH")][:5]
+    crit_items = "".join(
+        f'<li class="crit-item"><span class="crit-dot" style="background:{SEVERITY_HEX[f.severity.name]}"></span>'
+        f'<span class="crit-text">{_html_escape(f.title)}<div class="crit-principal">{_html_escape(f.principal_id)}</div></span></li>'
+        for f in top_findings
+    )
+    _no_crit_html = "<p style='color:#64748b;font-size:.8rem'>No critical or high findings.</p>"
+    critical_list_html = (
+        '<div class="panel"><h2>Recent Critical Findings</h2>'
+        f'<ul class="crit-list">{crit_items or _no_crit_html}</ul>'
+        '</div>'
+    )
+
+    # -- full findings + blast radius tables (unchanged from before) ------------------
+    findings_rows = ""
+    for f in findings:
+        c = SEVERITY_HEX.get(f.severity.name, "#6b7280")
+        findings_rows += (
+            f"<tr><td><span class='badge' style='background:{c}'>{f.severity.name}</span></td>"
+            f"<td>{_html_escape(f.title)}<br><small>{f.rule_id}</small></td>"
+            f"<td>{_html_escape(f.principal_id)}</td><td>{f.mitre_technique_id}</td>"
+            f"<td>{_html_escape(f.description)}</td></tr>"
+        )
+    blast_rows = ""
+    for r in result.blast_radius[:10]:
+        reaches = ", ".join(r.reachable_principals) if r.reachable_principals else "(nothing further)"
+        pct_color = "#dc2626" if r.percentage >= 75 else "#ea580c" if r.percentage >= 33 else "#22c55e"
+        blast_rows += (
+            f"<tr><td>{_html_escape(r.principal_id)}</td>"
+            f"<td style='color:{pct_color};font-weight:bold'>{r.percentage:.1f}%</td>"
+            f"<td>{_html_escape(reaches)}</td></tr>"
+        )
+
+    graph_script = """
+(function(){
+var DATA=__GRAPH_DATA__;
+var canvas=document.getElementById("graph-canvas");
+var ctx=canvas.getContext("2d");
+var W,H,zoom=1,pan={x:0,y:0};
+var nodeMap={};
+var dragging=null,dragOX=0,dragOY=0;
+var panning=false,panStart={x:0,y:0},panBase={x:0,y:0};
+var hover=null;
+
+function setup(){
+  W=canvas.offsetWidth||900; H=440;
+  canvas.width=W; canvas.height=H;
+  var cx=W/2,cy=H/2;
+  var ellipseNodes=DATA.nodes.filter(function(n){return n.shape==="ellipse";});
+  var boxNodes=DATA.nodes.filter(function(n){return n.shape==="box";});
+  var outerR=Math.min(W,H)*0.35;
+  var innerR=Math.min(W,H)*0.14;
+  ellipseNodes.forEach(function(n,i){
+    var a=(i/Math.max(ellipseNodes.length,1))*2*Math.PI-Math.PI/2;
+    nodeMap[n.id]=Object.assign({},n,{x:cx+outerR*Math.cos(a),y:cy+outerR*Math.sin(a),rx:36,ry:22});
+  });
+  boxNodes.forEach(function(n,i){
+    var a=(i/Math.max(boxNodes.length,1))*2*Math.PI-Math.PI/2;
+    nodeMap[n.id]=Object.assign({},n,{x:cx+innerR*Math.cos(a),y:cy+innerR*Math.sin(a),rx:28,ry:14});
+  });
+  draw();
+}
+
+function ws(x,y){return {x:x*zoom+pan.x,y:y*zoom+pan.y};}
+function sw(x,y){return {x:(x-pan.x)/zoom,y:(y-pan.y)/zoom};}
+
+function hitNode(sx,sy){
+  var w=sw(sx,sy);
+  var found=null;
+  Object.keys(nodeMap).forEach(function(k){
+    var n=nodeMap[k];
+    var dx=(w.x-n.x)/(n.rx+6),dy=(w.y-n.y)/(n.ry+6);
+    if(dx*dx+dy*dy<=1) found=n;
+  });
+  return found;
+}
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  DATA.edges.forEach(function(e){
+    var a=nodeMap[e.from],b=nodeMap[e.to];
+    if(!a||!b)return;
+    var sa=ws(a.x,a.y),sb=ws(b.x,b.y);
+    var dx=sb.x-sa.x,dy=sb.y-sa.y,dist=Math.sqrt(dx*dx+dy*dy);
+    if(dist<2)return;
+    var ux=dx/dist,uy=dy/dist;
+    var x1=sa.x+ux*a.rx*zoom,y1=sa.y+uy*a.ry*zoom;
+    var x2=sb.x-ux*b.rx*zoom,y2=sb.y-uy*b.ry*zoom;
+    ctx.save();
+    ctx.strokeStyle=e.color;
+    ctx.lineWidth=e.dashes?2:1.2;
+    if(e.dashes)ctx.setLineDash([7,4]);
+    ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();
+    ctx.setLineDash([]);
+    var ang=Math.atan2(y2-y1,x2-x1),hs=9;
+    ctx.fillStyle=e.color;
+    ctx.beginPath();ctx.moveTo(x2,y2);
+    ctx.lineTo(x2-hs*Math.cos(ang-.4),y2-hs*Math.sin(ang-.4));
+    ctx.lineTo(x2-hs*Math.cos(ang+.4),y2-hs*Math.sin(ang+.4));
+    ctx.closePath();ctx.fill();
+    if(e.dashes&&e.label){
+      ctx.fillStyle="#fca5a5";ctx.font="bold "+Math.max(9,10*zoom)+"px sans-serif";
+      ctx.textAlign="center";ctx.textBaseline="middle";
+      ctx.fillText(e.label,(x1+x2)/2,(y1+y2)/2-7);
+    }
+    ctx.restore();
+  });
+  Object.keys(nodeMap).forEach(function(k){
+    var n=nodeMap[k];
+    var s=ws(n.x,n.y);
+    var rx=n.rx*zoom,ry=n.ry*zoom;
+    var isHover=(hover&&hover.id===n.id);
+    ctx.save();
+    ctx.shadowColor=n.color;ctx.shadowBlur=isHover?18:6;
+    ctx.fillStyle=n.color;
+    ctx.beginPath();
+    if(n.shape==="box"){
+      var bw=rx*2,bh=ry*2;
+      ctx.roundRect(s.x-bw/2,s.y-bh/2,bw,bh,4);
+    }else{
+      ctx.ellipse(s.x,s.y,rx,ry,0,0,2*Math.PI);
+    }
+    ctx.fill();
+    ctx.shadowBlur=0;
+    var fs=Math.max(9,Math.min(13,11*zoom));
+    ctx.fillStyle="#fff";ctx.font=(n.shape==="box"?"":"bold ")+fs+"px sans-serif";
+    ctx.textAlign="center";ctx.textBaseline="middle";
+    var maxW=rx*1.8,txt=n.label;
+    if(ctx.measureText(txt).width>maxW)txt=txt.slice(0,Math.floor(txt.length*maxW/ctx.measureText(txt).width)-1)+"…";
+    ctx.fillText(txt,s.x,s.y);
+    ctx.restore();
+  });
+  if(hover){
+    var s=ws(hover.x,hover.y);
+    var txt=hover.title;
+    ctx.save();
+    ctx.font="12px sans-serif";
+    var tw=ctx.measureText(txt).width+16,th=24;
+    var tx=Math.min(s.x+hover.rx*zoom+4,W-tw-4),ty=s.y-th/2;
+    ctx.fillStyle="rgba(15,23,42,.96)";ctx.strokeStyle="#475569";ctx.lineWidth=1;
+    ctx.beginPath();ctx.roundRect(tx,ty,tw,th,4);ctx.fill();ctx.stroke();
+    ctx.fillStyle="#e2e8f0";ctx.textAlign="left";ctx.textBaseline="middle";
+    ctx.fillText(txt,tx+8,ty+th/2);
+    ctx.restore();
+  }
+}
+
+canvas.addEventListener("mousedown",function(e){
+  var r=canvas.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;
+  var n=hitNode(mx,my);
+  if(n){dragging=n;var s=ws(n.x,n.y);dragOX=mx-s.x;dragOY=my-s.y;}
+  else{panning=true;panStart={x:mx,y:my};panBase={x:pan.x,y:pan.y};}
+});
+canvas.addEventListener("mousemove",function(e){
+  var r=canvas.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;
+  if(dragging){var w=sw(mx-dragOX,my-dragOY);dragging.x=w.x;dragging.y=w.y;draw();}
+  else if(panning){pan.x=panBase.x+(mx-panStart.x);pan.y=panBase.y+(my-panStart.y);draw();}
+  else{var n=hitNode(mx,my);if(n!==hover){hover=n;draw();}}
+});
+canvas.addEventListener("mouseup",function(){dragging=null;panning=false;});
+canvas.addEventListener("mouseleave",function(){dragging=null;panning=false;hover=null;draw();});
+canvas.addEventListener("wheel",function(e){
+  e.preventDefault();
+  var r=canvas.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;
+  var f=e.deltaY<0?1.12:.89;
+  pan.x=(pan.x-mx)*f+mx;pan.y=(pan.y-my)*f+my;
+  zoom=Math.max(.2,Math.min(5,zoom*f));draw();
+},{passive:false});
+window.addEventListener("resize",function(){W=canvas.offsetWidth;canvas.width=W;canvas.height=H;draw();});
+setup();
+})();
+""".replace("__GRAPH_DATA__", graph_data)
+
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>CloudSentrix — Security Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
+<style>
+:root{{
+  --bg:#070707;--s0:#0B0B0B;--s1:#101010;--s2:#161616;--s3:#1E1E1E;--s4:#272727;
+  --bd:#202020;--bdb:#303030;--bdc:#3E3E3E;
+  --w:#F4F4F4;--w2:#C0C0C0;--w3:#888888;--w4:#505050;--w5:#333333;
+  --crit:#FF4444;--high:#FF8800;--med:#FFCC00;--low:#44CC44;
+}}
+*{{box-sizing:border-box;margin:0;padding:0;}}
+html{{scroll-behavior:smooth;}}
+body{{background:var(--bg);color:var(--w);font-family:'Inter',system-ui,sans-serif;line-height:1.6;overflow-x:hidden;cursor:none;}}
+::-webkit-scrollbar{{width:3px;}};::-webkit-scrollbar-track{{background:var(--bg);}};::-webkit-scrollbar-thumb{{background:var(--bdb);border-radius:2px;}}
+#trail{{position:fixed;top:0;left:0;pointer-events:none;z-index:9990;}}
+#cur{{position:fixed;width:8px;height:8px;background:var(--w);border-radius:50%;pointer-events:none;z-index:9999;transform:translate(-50%,-50%);mix-blend-mode:difference;}}
+.grid-bg{{position:fixed;inset:0;pointer-events:none;z-index:0;background-image:linear-gradient(rgba(255,255,255,.018) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.018) 1px,transparent 1px);background-size:72px 72px;mask-image:radial-gradient(ellipse 80% 80% at 50% 0%,black 0%,transparent 100%);}}
+.particles{{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:1;}}
+.particle{{position:absolute;border-radius:50%;animation:pfloat linear infinite;opacity:.05;}}
+@keyframes pfloat{{0%{{transform:translateY(100vh)}}100%{{transform:translateY(-100vh)}}}}
+
+header{{position:relative;z-index:10;padding:48px 56px 40px;border-bottom:1px solid var(--bd);background:var(--s0);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:24px;}}
+.hlogo{{display:flex;align-items:center;gap:14px;}}
+.hlogo-icon{{width:38px;height:38px;background:var(--s3);border:1px solid var(--bdb);border-radius:10px;display:flex;align-items:center;justify-content:center;animation:float 4s ease-in-out infinite;}}
+@keyframes float{{0%,100%{{transform:translateY(0)}}50%{{transform:translateY(-5px)}}}}
+.hlogo h1{{font-size:20px;font-weight:900;letter-spacing:-1px;}}
+.hlogo p{{font-size:11px;color:var(--w4);font-weight:600;letter-spacing:.5px;text-transform:uppercase;margin-top:2px;}}
+.hmeta{{font-size:11px;color:var(--w4);text-align:right;line-height:1.8;font-family:'JetBrains Mono',monospace;}}
+
+.section{{padding:48px 56px;position:relative;z-index:10;}}
+.section-title{{font-size:10px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:var(--w4);margin-bottom:24px;display:flex;align-items:center;gap:12px;}}
+.section-title::after{{content:'';flex:1;height:1px;background:var(--bd);}}
+
+.score-row{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1px;background:var(--bd);border:1px solid var(--bd);border-radius:14px;overflow:hidden;}}
+.score-card{{background:var(--s1);padding:28px;transition:background .2s;cursor:none;}}
+.score-card:hover{{background:var(--s2);}}
+.score-card .label{{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--w4);margin-bottom:12px;}}
+.score-card .value{{font-size:36px;font-weight:900;letter-spacing:-2px;line-height:1;}}
+.score-card .sub{{font-size:11px;color:var(--w4);margin-top:8px;}}
+.score-bar-bg{{background:var(--s3);border-radius:2px;height:2px;margin-top:14px;overflow:hidden;}}
+.score-bar-fill{{height:2px;border-radius:2px;transition:width 1.5s cubic-bezier(.4,0,.2,1);}}
+
+.grid-3{{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--bd);border:1px solid var(--bd);border-radius:14px;overflow:hidden;margin:0 56px 0;}}
+.panel{{background:var(--s1);padding:32px;transition:background .2s;position:relative;z-index:10;}}
+.panel:hover{{background:var(--s2);}}
+.panel h2{{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--w4);margin-bottom:20px;}}
+.panel table{{width:100%;border-collapse:collapse;font-size:12px;}}
+.panel th{{padding:8px 10px;text-align:left;border-bottom:1px solid var(--bd);font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--w4);}}
+.panel td{{padding:9px 10px;border-bottom:1px solid var(--bd);}}
+.panel tr:last-child td{{border-bottom:none;}}
+.panel tr:hover td{{background:var(--s3);}}
+.badge{{display:inline-block;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:700;font-family:'JetBrains Mono',monospace;}}
+code{{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--w3);}}
+small{{color:var(--w4);font-size:10px;}}
+
+.donut-wrap{{display:flex;align-items:center;gap:24px;}}
+.donut{{width:100px;height:100px;border-radius:50%;flex-shrink:0;position:relative;display:flex;align-items:center;justify-content:center;}}
+.donut-center{{background:var(--s1);width:60px;height:60px;border-radius:50%;display:flex;flex-direction:column;align-items:center;justify-content:center;}}
+.donut-center .n{{font-size:18px;font-weight:900;letter-spacing:-1px;}}
+.donut-center .t{{font-size:8px;color:var(--w4);font-weight:700;letter-spacing:1px;text-transform:uppercase;}}
+.donut-legend{{flex:1;}}
+.donut-legend-item{{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--w3);margin-bottom:6px;}}
+.dot{{width:6px;height:6px;border-radius:50%;flex-shrink:0;}}
+.pct{{margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--w4);}}
+
+.cat-row{{display:flex;align-items:center;gap:10px;margin-bottom:8px;font-size:11px;}}
+.cat-label{{width:130px;flex-shrink:0;color:var(--w3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}}
+.cat-bar-bg{{flex:1;background:var(--s3);border-radius:2px;height:4px;}}
+.cat-bar-fill{{height:4px;border-radius:2px;transition:width 1s ease;}}
+.cat-count{{width:28px;text-align:right;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--w4);}}
+
+.risky-row{{display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--bd);}}
+.risky-row:last-child{{border-bottom:none;}}
+.risky-id{{font-size:11px;color:var(--w2);font-family:'JetBrains Mono',monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:220px;}}
+
+.overview-row{{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--bd);border:1px solid var(--bd);border-radius:14px;overflow:hidden;margin-bottom:1px;}}
+.overview-card{{background:var(--s1);padding:28px;display:flex;align-items:center;gap:16px;transition:background .2s;}}
+.overview-card:hover{{background:var(--s2);}}
+.overview-icon{{font-size:22px;}}
+.overview-card .n{{font-size:28px;font-weight:900;letter-spacing:-1px;line-height:1;}}
+.overview-card .t{{font-size:10px;color:var(--w4);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-top:4px;}}
+
+.crit-list{{list-style:none;}}
+.crit-item{{display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid var(--bd);}}
+.crit-item:last-child{{border-bottom:none;}}
+.crit-dot{{width:6px;height:6px;border-radius:50%;flex-shrink:0;margin-top:5px;}}
+.crit-text{{font-size:12px;font-weight:600;color:var(--w2);}}
+.crit-principal{{font-size:10px;color:var(--w4);font-family:'JetBrains Mono',monospace;margin-top:2px;}}
+
+.graph-panel{{background:var(--s1);border:1px solid var(--bd);border-radius:14px;overflow:hidden;margin:0 56px 0;transition:background .2s;position:relative;z-index:10;}}
+.graph-panel:hover{{background:var(--s2);}}
+.graph-header{{padding:24px 32px;border-bottom:1px solid var(--bd);}}
+.graph-header h2{{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--w4);}}
+.legend{{display:flex;gap:20px;margin-top:10px;flex-wrap:wrap;}}
+.legend-item{{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--w4);}}
+#graph-canvas{{width:100%;display:block;background:transparent;}}
+
+.full-table-panel{{background:var(--s1);border:1px solid var(--bd);border-radius:14px;overflow:hidden;margin:0 56px;position:relative;z-index:10;}}
+.full-table-panel h2{{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--w4);padding:24px 32px 0;margin-bottom:0;}}
+.full-table-panel table{{width:100%;border-collapse:collapse;font-size:12px;}}
+.full-table-panel th{{padding:10px 16px;text-align:left;border-bottom:1px solid var(--bd);font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--w4);}}
+.full-table-panel td{{padding:10px 16px;border-bottom:1px solid var(--bd);vertical-align:top;}}
+.full-table-panel tr:last-child td{{border-bottom:none;}}
+.full-table-panel tr:hover td{{background:var(--s2);}}
+
+footer{{position:relative;z-index:10;padding:24px 56px;border-top:1px solid var(--bd);background:var(--s0);text-align:center;font-size:11px;color:var(--w4);}}
+footer a{{color:var(--w3);text-decoration:none;}}
+footer a:hover{{color:var(--w);}}
+
+.reveal{{opacity:0;transform:translateY(20px);transition:opacity .7s ease,transform .7s ease;}}
+.reveal.visible{{opacity:1;transform:translateY(0);}}
+
+@media(max-width:900px){{
+  .grid-3,.overview-row{{grid-template-columns:1fr;}}
+  header,.section,.graph-panel,.full-table-panel{{padding:28px 24px;}}
+  .grid-3,.graph-panel,.full-table-panel{{margin:0 0;}}
+}}
+</style>
+</head>
+<body>
+<canvas id="trail"></canvas>
+<div id="cur"></div>
+<div class="grid-bg"></div>
+<div class="particles" id="particles"></div>
+
+<header>
+  <div class="hlogo">
+    <div class="hlogo-icon">
+      <svg width="20" height="14" viewBox="0 0 100 68" fill="none">
+        <path d="M78 58H26C14.4 58 5 48.6 5 37s9.4-21 21-21c1.4 0 2.8.14 4.1.4C34.2 8.8 43.8 2 55 2c14.6 0 26.6 10.8 27.8 24.6C83.8 26.2 84.9 26 86 26c7.7 0 14 6.3 14 14s-6.3 14-14 14H78z" fill="url(#hg)"/>
+        <defs><linearGradient id="hg" x1="5" y1="2" x2="100" y2="68" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#888"/><stop offset="1" stop-color="#444"/></linearGradient></defs>
+      </svg>
+    </div>
+    <div>
+      <h1>CloudSentrix</h1>
+      <p>Security Dashboard</p>
+    </div>
+  </div>
+  <div class="hmeta">
+    Source: {_html_escape(result.source_file)}<br>
+    Cloud: {result.cloud.upper()}&nbsp;·&nbsp;Generated: {generated_at}
+  </div>
+</header>
+
+<div class="section reveal">
+  <div class="section-title">Security Score</div>
+  <div class="score-row">{score_cards}</div>
+</div>
+
+<div class="grid-3 reveal">{donut_html}{category_html}{top_risky_html}</div>
+
+<div style="height:1px;background:var(--bd);margin:48px 56px;position:relative;z-index:10;"></div>
+
+<div class="overview-row reveal">{overview_html}</div>
+
+<div style="height:1px;background:var(--bd);margin:48px 56px;position:relative;z-index:10;"></div>
+
+<div class="graph-panel reveal">
+  <div class="graph-header">
+    <h2>Interactive Attack Graph</h2>
+    <div class="legend">
+      <span class="legend-item"><span class="dot" style="background:#FF4444"></span>Critical</span>
+      <span class="legend-item"><span class="dot" style="background:#FF8800"></span>High</span>
+      <span class="legend-item"><span class="dot" style="background:#4285f4"></span>Principal</span>
+      <span class="legend-item"><span class="dot" style="background:#505050"></span>Role/Permission</span>
+      <span class="legend-item"><span class="dot" style="background:#FF4444;border-radius:0"></span>── Escalation Path</span>
+    </div>
+  </div>
+  <canvas id="graph-canvas" height="420"></canvas>
+</div>
+
+<div style="height:48px;position:relative;z-index:10;"></div>
+
+<div class="full-table-panel reveal">
+  <h2 style="margin-bottom:16px">All Findings</h2>
+  <table>
+    <tr><th>Severity</th><th>Finding</th><th>Principal</th><th>MITRE</th><th>Description</th></tr>
+    {findings_rows or '<tr><td colspan="5" style="color:var(--w4);padding:24px">No findings.</td></tr>'}
+  </table>
+</div>
+
+<div style="height:24px;position:relative;z-index:10;"></div>
+
+<div class="full-table-panel reveal" style="margin-top:1px">
+  <h2 style="margin-bottom:16px">Blast Radius</h2>
+  <table>
+    <tr><th>Principal</th><th>Blast Radius</th><th>Can Reach</th></tr>
+    {blast_rows or '<tr><td colspan="3" style="color:var(--w4);padding:24px">No blast radius data.</td></tr>'}
+  </table>
+</div>
+
+<div style="height:48px;position:relative;z-index:10;"></div>
+
+<footer>
+  Generated by <strong>CloudSentrix v2.0.0</strong> &nbsp;·&nbsp;
+  <a href="https://github.com/Talha-Imran-cloud/cloudsentrix" target="_blank">github.com/Talha-Imran-cloud/cloudsentrix</a>
+  &nbsp;·&nbsp; <a href="https://www.linkedin.com/in/talha-imran-583a44420" target="_blank">Talha Imran</a>
+</footer>
+
+<script>
+/* Trail */
+const canvas=document.getElementById('trail');
+const ctx=canvas.getContext('2d');
+function resize(){{canvas.width=window.innerWidth;canvas.height=window.innerHeight;}}
+resize();window.addEventListener('resize',resize);
+const pts=[];
+document.addEventListener('mousemove',e=>{{
+  pts.push({{x:e.clientX,y:e.clientY,t:Date.now()}});
+  document.getElementById('cur').style.left=e.clientX+'px';
+  document.getElementById('cur').style.top=e.clientY+'px';
+}});
+(function draw(){{
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  const now=Date.now();
+  while(pts.length>0&&now-pts[0].t>600)pts.shift();
+  if(pts.length>1){{
+    for(let i=1;i<pts.length;i++){{
+      const prog=i/pts.length,alpha=prog*0.3,w=prog*2;
+      ctx.beginPath();ctx.moveTo(pts[i-1].x,pts[i-1].y);ctx.lineTo(pts[i].x,pts[i].y);
+      ctx.strokeStyle=`rgba(220,220,220,${{alpha}})`;ctx.lineWidth=w;ctx.lineCap='round';ctx.stroke();
+    }}
+  }}
+  requestAnimationFrame(draw);
+}})();
+
+/* Particles */
+(function(){{
+  const p=document.getElementById('particles');
+  for(let i=0;i<16;i++){{
+    const el=document.createElement('div');el.className='particle';
+    const s=Math.random()*3+1.5;
+    el.style.cssText=`width:${{s}}px;height:${{s}}px;background:#888;left:${{Math.random()*100}}%;animation-duration:${{Math.random()*20+15}}s;animation-delay:-${{Math.random()*15}}s;`;
+    p.appendChild(el);
+  }}
+}})();
+
+/* Scroll reveal */
+const obs=new IntersectionObserver(e=>{{e.forEach(x=>{{if(x.isIntersecting){{x.target.classList.add('visible');obs.unobserve(x.target);}}}});}},{{threshold:.1}});
+document.querySelectorAll('.reveal').forEach(el=>obs.observe(el));
+
+/* Graph */
+{graph_script}
+</script>
+</body>
+</html>"""
+
+def infer_export_format(output_path: Path, explicit_format: str | None) -> str:
+    if explicit_format:
+        return explicit_format
+    fmt = _EXPORT_EXTENSION_FORMAT.get(output_path.suffix.lower())
+    if fmt is None:
+        raise ValueError(
+            f"Could not infer export format from '{output_path.name}'. Pass --format json|csv|html explicitly."
+        )
+    return fmt
+
+
+def run_export(file_path: str, output: str, fmt: str | None, cloud: str = "gcp") -> tuple[ScanResult, str, Path]:
+    result = run_scan(file_path, cloud=cloud)
+    output_path = Path(output)
+    resolved_format = infer_export_format(output_path, fmt)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _EXPORTERS[resolved_format](result, output_path)
+    return result, resolved_format, output_path
+
+
+# ---------------------------------------------------------------------------
+# Rendering — the only layer that touches OutputWriter/rich
+# ---------------------------------------------------------------------------
+
+def render_banner(writer: OutputWriter) -> None:
+    for line in CLOUD_LOGO.splitlines():
+        writer.print(f"[bold cyan]{line}[/bold cyan]")
+
+    title_lines = [
+        f"CloudSentrix v{__version__}",
+        "Multi-Cloud IAM Security Analyzer — GCP · AWS · Azure · K8s · Terraform",
+    ]
+    width = max(len(line) for line in title_lines) + 4
+    writer.print(f"[bold cyan]{'╔' + '═' * width + '╗'}[/bold cyan]")
+    for line in title_lines:
+        writer.print(f"[bold cyan]║{line.center(width)}║[/bold cyan]")
+    writer.print(f"[bold cyan]{'╚' + '═' * width + '╝'}[/bold cyan]")
+    writer.print("")
+
+
+def render_findings(writer: OutputWriter, findings: list[Finding]) -> None:
+    writer.print("[bold]── Findings ──────────────────────────────────────────[/bold]")
+    if not findings:
+        writer.print("[bold green]No findings at or above the selected severity.[/bold green]\n")
+        return
+
+    for f in findings:
+        color = SEVERITY_COLOR.get(f.severity, "white")
+        writer.print(f"[{color}]{f.severity}[/{color}] — {f.title} ({f.rule_id})")
+        writer.print(f"  Principal : {f.principal_id}")
+        writer.print(f"  MITRE     : {f.mitre_technique_id} - {f.mitre_technique_name}")
+        writer.print(f"  Details   : {f.description}")
+        writer.print("")
+
+
+def render_risk_score(writer: OutputWriter, risk: RiskScore) -> None:
+    color = RATING_COLOR.get(risk.rating, "white")
+    writer.print("[bold]── Overall Risk ──────────────────────────────────────[/bold]")
+    writer.print(f"[{color}]Security Score: {risk.score}/100 ({risk.rating.value})[/{color}]")
+    counts = risk.finding_counts
+    writer.print(
+        f"Findings: {counts['CRITICAL']} Critical, {counts['HIGH']} High, "
+        f"{counts['MEDIUM']} Medium, {counts['LOW']} Low\n"
+    )
+
+
+def render_blast_radius(writer: OutputWriter, results: list, top_n: int) -> None:
+    """Renders blast radius for GCP, AWS, and Azure results."""
+    writer.print("[bold]── Blast Radius (highest risk first) ─────────────────[/bold]")
+    shown = results[: max(0, top_n)]
+    if not shown:
+        writer.print("(no principals to show)\n")
+        return
+    for r in shown:
+        # AWS BlastResult
+        if hasattr(r, "blast_score"):
+            level = r.blast_level
+            name  = getattr(r, "principal_name", r.principal_id)
+            pct   = r.percentage
+            reach = len(r.reachable_principals)
+            writer.print(
+                f"  {name:<40} [bold]{pct:>6.1f}%[/bold]  "
+                f"Score: {r.blast_score}/100 ({level})  Reaches: {reach} principal(s)"
+            )
+        else:
+            # GCP BlastResult
+            reaches = ", ".join(r.reachable_principals[:3]) if r.reachable_principals else "(nothing further)"
+            writer.print(f"  {r.principal_id:<45} [bold]{r.percentage:>6.1f}%[/bold]  -> {reaches}")
+    writer.print("")
+
+
+def render_single_blast_radius(writer: OutputWriter, result: BlastRadiusResult) -> None:
+    reaches = ", ".join(result.reachable_principals) if result.reachable_principals else "(nothing further)"
+    writer.print(f"[bold]{result.principal_id}[/bold]")
+    total_o = getattr(result, "total_others", getattr(result, "total_principals", 0))
+    writer.print(f"Blast radius : [bold]{result.percentage:.1f}%[/bold] of {total_o} other principal(s)")
+    writer.print(f"Can reach    : {reaches}\n")
+
+
+def render_rules_list(writer: OutputWriter) -> None:
+    writer.print("[bold]── GCP Detection Rules ───────────────────────────────[/bold]")
+    for rule in DetectionEngine().rules:
+        color = SEVERITY_COLOR.get(rule.severity, "white")
+        writer.print(f"[{color}]{rule.rule_id}[/{color}] {rule.title}  ({rule.severity})")
+        writer.print(f"  MITRE: {rule.mitre_technique_id} - {rule.mitre_technique_name}")
+    writer.print("")
+
+    writer.print("[bold]── AWS Detection Rules ───────────────────────────────[/bold]")
+    from aws_detection import AWSDetectionEngine
+    for rule in AWSDetectionEngine()._default_rules():
+        color = SEVERITY_COLOR.get(rule.severity, "white")
+        writer.print(f"[{color}]{rule.rule_id}[/{color}] {rule.title}  ({rule.severity})")
+        writer.print(f"  MITRE: {rule.mitre_technique_id} - {rule.mitre_technique_name}")
+    writer.print("")
+
+    writer.print("[bold]── Azure RBAC Detection Rules ────────────────────────[/bold]")
+    sev_color = {"CRITICAL": "red", "HIGH": "yellow", "MEDIUM": "blue", "LOW": "green"}
+    for rule in get_azure_rules():
+        color = sev_color.get(rule["severity"], "white")
+        writer.print(f"[{color}]{rule['id']}[/{color}] {rule['title']}  ({rule['severity']})")
+        writer.print(f"  MITRE: {rule['mitre']}")
+    writer.print("")
+
+    writer.print("[bold]── Azure AD / Entra ID Detection Rules ──────────────[/bold]")
+    for rule in get_azure_ad_rules():
+        color = sev_color.get(rule["severity"], "white")
+        writer.print(f"[{color}]{rule['id']}[/{color}] {rule['title']}  ({rule['severity']})")
+        writer.print(f"  MITRE: {rule['mitre']}")
+    writer.print("")
+
+    writer.print("[bold]── Terraform IaC Detection Rules ────────────────────[/bold]")
+    for rule in get_terraform_rules():
+        color = sev_color.get(rule["severity"], "white")
+        writer.print(f"[{color}]{rule['id']}[/{color}] {rule['title']}  ({rule['severity']})")
+        writer.print(f"  MITRE: {rule['mitre']}")
+    for rule in get_tfstate_rules():
+        color = sev_color.get(rule["severity"], "white")
+        writer.print(f"[{color}]{rule['id']}[/{color}] {rule['title']}  ({rule['severity']})")
+        writer.print(f"  MITRE: {rule['mitre']}")
+    writer.print("")
+
+    writer.print("[bold]── Kubernetes RBAC Detection Rules ──────────────────[/bold]")
+    for rule in get_k8s_rules():
+        color = sev_color.get(rule["severity"], "white")
+        writer.print(f"[{color}]{rule['id']}[/{color}] {rule['title']}  ({rule['severity']})")
+        writer.print(f"  MITRE: {rule['mitre']}")
+    writer.print("")
+
+
+def render_principals_list(writer: OutputWriter, graph) -> None:
+    writer.print("[bold]── Principals ────────────────────────────────────────[/bold]")
+    _is_aws = hasattr(graph, "permission_ids")
+    _is_azure = hasattr(graph, "assignments")  # AzureIAMData
+
+    if _is_azure:
+        # Azure — group assignments by principal
+        from collections import defaultdict
+        groups: dict = defaultdict(list)
+        for assign in graph.assignments:
+            groups[assign.principal_name].append(assign)
+        for name in sorted(groups):
+            assigns = groups[name]
+            ptype = assigns[0].principal_type
+            writer.print(f"[bold]{name}[/bold] ({ptype})")
+            for a in assigns[:3]:
+                writer.print(f"    - {a.role_definition_name} @ {a.scope_level}")
+        writer.print("")
+        return
+
+    for principal_id in sorted(graph.principal_ids()):
+        p = graph.get_principal(principal_id)
+        if _is_aws:
+            ptype = p.principal_type.value if p is not None else "unknown"
+            writer.print(f"[bold]{principal_id}[/bold] ({ptype})")
+            for perm in sorted(graph.permissions_of(principal_id))[:5]:
+                short = perm.replace("managed-policy:arn:aws:iam::aws:policy/", "policy/")
+                writer.print(f"    - {short}")
+        else:
+            member_type = p.member_type.value if p is not None else "unknown"
+            writer.print(f"[bold]{principal_id}[/bold] ({member_type})")
+            for role in sorted(graph.roles_of(principal_id)):
+                writer.print(f"    - {role}")
+    writer.print("")
+
+
+def render_validate(writer: OutputWriter, file_path: str, policy: ParsedIAMPolicy, warnings: list[str]) -> None:
+    stats = policy.summary()
+    writer.print("[bold]── Validation ────────────────────────────────────────[/bold]")
+    writer.print(f"[bold green]VALID[/bold green] — {file_path} is a well-formed GCP IAM policy export.")
+    writer.print(
+        f"Bindings: {stats['total_bindings']}  |  Member entries: {stats['total_member_entries']}  |  "
+        f"Unique members: {stats['unique_members']}"
+    )
+    if warnings:
+        writer.print(f"\n[bold yellow]{len(warnings)} warning(s):[/bold yellow]")
+        for w in warnings:
+            writer.print(f"  [yellow]•[/yellow] {w}")
+    writer.print("")
+
+
+def render_score_only(writer: OutputWriter, risk: RiskScore) -> None:
+    color = RATING_COLOR.get(risk.rating, "white")
+    writer.print(f"[{color}]{risk.score}/100 ({risk.rating.value})[/{color}]")
+
+
+def render_compare(writer: OutputWriter, comparison: ComparisonResult) -> None:
+    writer.print("[bold]── Comparison ────────────────────────────────────────[/bold]")
+    writer.print(f"Old : {comparison.old_file}  ({comparison.old_score.score}/100, {comparison.old_score.rating.value})")
+    writer.print(f"New : {comparison.new_file}  ({comparison.new_score.score}/100, {comparison.new_score.rating.value})")
+
+    delta = comparison.new_score.score - comparison.old_score.score
+    delta_color = "bold red" if delta < 0 else ("bold green" if delta > 0 else "white")
+    sign = "+" if delta > 0 else ""
+    writer.print(f"Score change: [{delta_color}]{sign}{delta}[/{delta_color}]\n")
+
+    writer.print(f"[bold red]New risks ({len(comparison.new_findings)})[/bold red]")
+    if not comparison.new_findings:
+        writer.print("  (none)")
+    for f in comparison.new_findings:
+        color = SEVERITY_COLOR.get(f.severity, "white")
+        writer.print(f"  [{color}]{f.severity.name}[/{color}] {f.title} — {f.principal_id} ({f.rule_id})")
+    writer.print("")
+
+    writer.print(f"[bold green]Resolved risks ({len(comparison.resolved_findings)})[/bold green]")
+    if not comparison.resolved_findings:
+        writer.print("  (none)")
+    for f in comparison.resolved_findings:
+        writer.print(f"  {f.title} — {f.principal_id} ({f.rule_id})")
+    writer.print("")
+
+    writer.print(f"Persistent risks (still present): {len(comparison.persistent_findings)}\n")
+
+
+def render_principal_path(
+    writer: OutputWriter, source: str, target: str, source_exists: bool, target_exists: bool, path: list[str] | None
+) -> None:
+    writer.print("[bold]── Escalation Path ───────────────────────────────────[/bold]")
+    if not source_exists:
+        writer.print(f"[bold red]'{source}' was not found in the graph.[/bold red]\n")
+        return
+    if not target_exists:
+        writer.print(f"[bold red]'{target}' was not found in the graph.[/bold red]\n")
+        return
+    if path is None:
+        writer.print(f"[bold green]No escalation path found from '{source}' to '{target}'.[/bold green]\n")
+        return
+
+    writer.print(f"[bold red]Path found[/bold red] ({len(path) - 1} hop(s)):")
+    writer.print("  " + "  ->  ".join(path))
+    writer.print("")
+
+
+def render_mitre_map(writer: OutputWriter, findings: list[Finding]) -> None:
+    writer.print("[bold]── MITRE ATT&CK Cloud Matrix Mapping ─────────────────[/bold]")
+    if not findings:
+        writer.print("[bold green]No findings to map.[/bold green]\n")
+        return
+
+    grouped = group_findings_by_mitre(findings)
+    ordered_techniques = sorted(
+        grouped.items(), key=lambda item: max(f.severity for f in item[1]), reverse=True,
+    )
+
+    for technique_id, technique_findings in ordered_techniques:
+        technique_name = technique_findings[0].mitre_technique_name
+        writer.print(f"[bold]{technique_id}[/bold] — {technique_name}  ({len(technique_findings)} finding(s))")
+        for f in technique_findings:
+            color = SEVERITY_COLOR.get(f.severity, "white")
+            writer.print(f"    [{color}]{f.severity.name}[/{color}] {f.principal_id} — {f.title} ({f.rule_id})")
+        writer.print("")
+
+
+def render_remediate(writer: OutputWriter, findings: list[Finding], graph: IAMGraph, project: str) -> None:
+    writer.print("[bold]── Remediation Commands ──────────────────────────────[/bold]")
+    if not findings:
+        writer.print("[bold green]No findings to remediate.[/bold green]\n")
+        return
+    if project == DEFAULT_PROJECT_PLACEHOLDER:
+        writer.print(
+            f"[yellow]Note: no --project given — commands use the placeholder "
+            f"'{DEFAULT_PROJECT_PLACEHOLDER}'. Replace it, or re-run with --project YOUR_REAL_PROJECT.[/yellow]\n"
+        )
+
+    for f in findings:
+        color = SEVERITY_COLOR.get(f.severity, "white")
+        writer.print(f"[{color}]{f.severity.name}[/{color}] {f.title} — {f.principal_id} ({f.rule_id})")
+        for line in generate_remediation(f, graph, project):
+            writer.print(f"  {line}")
+        writer.print("")
+
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="cloudsentrix",
+        description="CloudSentrix — GCP IAM privilege-escalation attack-path analyzer.",
+    )
+    parser.add_argument("--version", action="version", version=f"CloudSentrix {__version__}")
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    scan_parser = subparsers.add_parser("scan", help="Scan a GCP or AWS IAM policy export for privilege-escalation risk.")
+    scan_parser.add_argument("--file", "-f", required=True, help="Path to a GCP or AWS IAM policy JSON export.")
+    scan_parser.add_argument(
+        "--cloud", default="gcp", choices=["gcp", "aws", "azure", "azure-ad"],
+        help="Cloud provider: 'gcp' (default) or 'aws'.",
+    )
+    scan_parser.add_argument(
+        "--severity", default="all", choices=sorted(SEVERITY_CHOICES),
+        help="Minimum severity to display (default: all).",
+    )
+    scan_parser.add_argument(
+        "--top", type=int, default=5,
+        help="Number of blast-radius rows to display (default: 5).",
+    )
+    scan_parser.add_argument(
+        "--notify", default=None, choices=["slack", "teams"],
+        help="Send findings to Slack or Teams after scan.",
+    )
+    scan_parser.add_argument(
+        "--webhook", default=None, metavar="URL",
+        help="Webhook URL (overrides env vars CLOUDSENTRIX_SLACK_WEBHOOK / CLOUDSENTRIX_TEAMS_WEBHOOK).",
+    )
+    scan_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
+    scan_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
+
+    blast_parser = subparsers.add_parser(
+        "blast-radius", help="Show the blast radius for one specific principal."
+    )
+    blast_parser.add_argument("--file", "-f", required=True, help="Path to a GCP IAM policy JSON export.")
+    blast_parser.add_argument("--principal", "-p", required=True, help="Principal id (e.g. an email) to check.")
+    blast_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws", "azure", "azure-ad"], help="Cloud provider.")
+    blast_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
+    blast_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
+
+    # cross-cloud command
+    cc_parser = subparsers.add_parser(
+        "cross-cloud",
+        help="Detect attack chains that span multiple clouds (AWS→Azure, GCP→AWS, etc.).",
+    )
+    cc_parser.add_argument("--gcp",   default=None, metavar="FILE", help="GCP IAM JSON export.")
+    cc_parser.add_argument("--aws",   default=None, metavar="FILE", help="AWS IAM JSON export.")
+    cc_parser.add_argument("--azure", default=None, metavar="FILE", help="Azure RBAC JSON export.")
+    cc_parser.add_argument("--output", "-o", default=None, metavar="FILE",
+        help="Save findings as JSON (e.g. cross-cloud-findings.json).")
+    cc_parser.add_argument("--no-color",  action="store_true", help="Disable colored output.")
+    cc_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
+
+    # k8s command
+    k8s_parser = subparsers.add_parser(
+        "k8s",
+        help="Scan Kubernetes RBAC files for privilege-escalation risks.",
+    )
+    k8s_parser.add_argument("--path", "-p", required=True, metavar="PATH",
+        help="Path to a K8s RBAC JSON/YAML file or directory.")
+    k8s_parser.add_argument("--output", "-o", default=None, metavar="FILE",
+        help="Save findings as JSON.")
+    k8s_parser.add_argument("--no-color",  action="store_true")
+    k8s_parser.add_argument("--no-banner", action="store_true")
+
+    # terraform command
+    tf_parser = subparsers.add_parser(
+        "terraform",
+        help="Scan Terraform .tf files for IAM misconfigurations before deployment.",
+    )
+    tf_parser.add_argument("--path", "-p", required=True, metavar="PATH",
+        help="Path to a .tf file or directory containing .tf files.")
+    tf_parser.add_argument("--output", "-o", default=None, metavar="FILE",
+        help="Optional: save findings as JSON (e.g. tf-findings.json).")
+    tf_parser.add_argument("--no-color",  action="store_true", help="Disable colored output.")
+    tf_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
+
+    # report-multi command
+    rmp = subparsers.add_parser(
+        "report-multi",
+        help="Generate a single PDF report covering GCP, AWS, and Azure in one document.",
+    )
+    rmp.add_argument("--gcp",   default=None, metavar="FILE", help="GCP IAM JSON export.")
+    rmp.add_argument("--aws",   default=None, metavar="FILE", help="AWS IAM JSON export.")
+    rmp.add_argument("--azure", default=None, metavar="FILE", help="Azure RBAC JSON export.")
+    rmp.add_argument("--output", "-o", default="multi_cloud_report.pdf",
+                     help="Output PDF file (default: multi_cloud_report.pdf).")
+    rmp.add_argument("--no-ai", action="store_true", default=True,
+                     help="Skip Gemini AI summary (default: True).")
+    rmp.add_argument("--no-color",  action="store_true", help="Disable colored output.")
+    rmp.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
+
+    # dashboard command
+    dash_parser = subparsers.add_parser(
+        "dashboard",
+        help="Generate a single multi-cloud HTML dashboard comparing GCP, AWS, and Azure.",
+    )
+    dash_parser.add_argument("--gcp",   default=None, metavar="FILE", help="GCP IAM JSON export file.")
+    dash_parser.add_argument("--aws",   default=None, metavar="FILE", help="AWS IAM JSON export file.")
+    dash_parser.add_argument("--azure", default=None, metavar="FILE", help="Azure RBAC JSON export file.")
+    dash_parser.add_argument("--output", "-o", default="multi_cloud_dashboard.html", metavar="FILE",
+                             help="Output HTML file (default: multi_cloud_dashboard.html).")
+    dash_parser.add_argument("--no-color",  action="store_true", help="Disable colored output.")
+    dash_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
+
+    rules_parser = subparsers.add_parser("rules", help="List every detection rule this tool checks for.")
+    rules_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
+    rules_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
+
+    list_parser = subparsers.add_parser(
+        "list-principals", help="Quick inventory: every principal and the roles it holds."
+    )
+    list_parser.add_argument("--file", "-f", required=True, help="Path to a GCP IAM policy JSON export.")
+    list_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws", "azure", "azure-ad"], help="Cloud provider.")
+    list_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
+    list_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
+
+    validate_parser = subparsers.add_parser(
+        "validate", help="Check that a file is a well-formed GCP IAM policy export, before scanning it."
+    )
+    validate_parser.add_argument("--file", "-f", required=True, help="Path to a GCP or AWS IAM policy JSON export.")
+    validate_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws", "azure", "azure-ad"], help="Cloud provider.")
+    validate_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
+    validate_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
+
+    score_parser = subparsers.add_parser(
+        "score", help="Print only the overall security score — useful for CI badges/checks."
+    )
+    score_parser.add_argument("--file", "-f", required=True, help="Path to a GCP IAM policy JSON export.")
+    score_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws", "azure", "azure-ad"], help="Cloud provider.")
+    score_parser.add_argument(
+        "--min-score", type=int, default=None, metavar="N",
+        help="Exit 1 if the score falls below N (overrides the default CRITICAL-based exit code).",
+    )
+    score_parser.add_argument("--json", action="store_true", help="Output as a single line of JSON.")
+    score_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
+    score_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
+
+    compare_parser = subparsers.add_parser(
+        "compare", help="Compare two IAM policy exports and show what risk changed between them."
+    )
+    compare_parser.add_argument("--old", required=True, help="Path to the earlier/baseline IAM policy JSON export.")
+    compare_parser.add_argument("--new", required=True, help="Path to the newer IAM policy JSON export.")
+    compare_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws", "azure", "azure-ad"], help="Cloud provider.")
+    compare_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
+    compare_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
+
+    path_parser = subparsers.add_parser(
+        "principal-path", help="Show the escalation path (if any) from one principal to another."
+    )
+    path_parser.add_argument("--file", "-f", required=True, help="Path to a GCP IAM policy JSON export.")
+    path_parser.add_argument("--source", "-s", required=True, help="Starting principal id (e.g. an email).")
+    path_parser.add_argument("--target", "-t", required=True, help="Target principal id to try to reach.")
+    path_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws", "azure", "azure-ad"], help="Cloud provider.")
+    path_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
+    path_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
+
+    mitre_parser = subparsers.add_parser(
+        "mitre-map", help="Map every finding onto the MITRE ATT&CK Cloud Matrix."
+    )
+    mitre_parser.add_argument("--file", "-f", required=True, help="Path to a GCP IAM policy JSON export.")
+    mitre_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws", "azure", "azure-ad"], help="Cloud provider.")
+    mitre_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
+    mitre_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
+
+    remediate_parser = subparsers.add_parser(
+        "remediate", help="Generate gcloud CLI commands that fix each finding."
+    )
+    remediate_parser.add_argument("--file", "-f", required=True, help="Path to a GCP IAM policy JSON export.")
+    remediate_parser.add_argument(
+        "--project", default=DEFAULT_PROJECT_PLACEHOLDER,
+        help="GCP project id to use in generated commands (default: a placeholder you must replace).",
+    )
+    remediate_parser.add_argument(
+        "--severity", default="all", choices=sorted(SEVERITY_CHOICES),
+        help="Minimum severity to generate fixes for (default: all).",
+    )
+    remediate_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws", "azure", "azure-ad"], help="Cloud provider.")
+    remediate_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
+    remediate_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
+
+    export_parser = subparsers.add_parser(
+        "export", help="Run a scan and export the results to a file (json, csv, or html)."
+    )
+    export_parser.add_argument("--file", "-f", required=True, help="Path to a GCP IAM policy JSON export.")
+    export_parser.add_argument("--output", "-o", required=True, help="Output file path.")
+    export_parser.add_argument(
+        "--format", choices=["json", "csv", "html", "sarif"], default=None,
+        help="Output format (default: inferred from --output's extension).",
+    )
+    export_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws", "azure", "azure-ad"], help="Cloud provider.")
+    export_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
+    export_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
+
+    watch_parser = subparsers.add_parser(
+        "watch", help="Monitor a file or folder and automatically re-scan whenever it changes."
+    )
+    watch_parser.add_argument(
+        "--path", "-d", required=True,
+        help="A single IAM policy JSON file, or a directory containing *.json exports.",
+    )
+    watch_parser.add_argument(
+        "--interval", type=float, default=2.0, metavar="SECONDS",
+        help="Poll interval in seconds (default: 2.0).",
+    )
+    watch_parser.add_argument(
+        "--severity", default="all", choices=sorted(SEVERITY_CHOICES),
+        help="Minimum severity to display on each re-scan (default: all).",
+    )
+    watch_parser.add_argument(
+        "--top", type=int, default=5,
+        help="Number of blast-radius rows to display on each re-scan (default: 5).",
+    )
+    watch_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws", "azure", "azure-ad"], help="Cloud provider.")
+    watch_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
+    watch_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
+
+    report_parser = subparsers.add_parser(
+        "report",
+        help="Generate a client-ready PDF report with an optional Gemini AI summary.",
+    )
+    report_parser.add_argument("--file", "-f", required=True, help="Path to a GCP IAM policy JSON export.")
+    report_parser.add_argument(
+        "--output", "-o", default="report.pdf",
+        help="Output PDF file path (default: report.pdf).",
+    )
+    report_parser.add_argument(
+        "--no-ai", action="store_true",
+        help="Skip the Gemini AI summary and use the built-in template summary instead.",
+    )
+    report_parser.add_argument("--cloud", default="gcp", choices=["gcp", "aws", "azure", "azure-ad"], help="Cloud provider.")
+    report_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
+    report_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
+
+    live_scan_parser = subparsers.add_parser(
+        "live-scan",
+        help="Fetch live IAM policy from GCP or AWS and scan it directly.",
+    )
+    live_scan_parser.add_argument(
+        "--project", "-p", default=None,
+        help="GCP Project ID to fetch and scan (e.g. my-project-123). Required for --cloud gcp.",
+    )
+    live_scan_parser.add_argument(
+        "--save", default=None, metavar="PATH",
+        help="Optionally save the fetched policy to a JSON file.",
+    )
+    live_scan_parser.add_argument(
+        "--severity", default="all", choices=sorted(SEVERITY_CHOICES),
+        help="Minimum severity to display (default: all).",
+    )
+    live_scan_parser.add_argument(
+        "--top", type=int, default=5,
+        help="Number of blast-radius rows to display (default: 5).",
+    )
+    live_scan_parser.add_argument(
+        "--cloud", default="gcp", choices=["gcp", "aws", "azure", "azure-ad"],
+        help="Cloud provider to scan (default: gcp).",
+    )
+    # AWS-specific options
+    live_scan_parser.add_argument(
+        "--profile", default=None,
+        help="[AWS] AWS CLI profile name (from ~/.aws/credentials). Default: use env vars.",
+    )
+    live_scan_parser.add_argument(
+        "--region", default="us-east-1",
+        help="[AWS] AWS region (default: us-east-1).",
+    )
+    live_scan_parser.add_argument(
+        "--endpoint", default=None,
+        help="[AWS] Override endpoint URL — use http://localhost:4566 for LocalStack testing.",
+    )
+    # Azure-specific options
+    live_scan_parser.add_argument(
+        "--subscription", default=None,
+        help="[Azure] Azure subscription ID or name. Default: uses currently active subscription.",
+    )
+    live_scan_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
+    live_scan_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
+
+    return parser
+
+
+# ---------------------------------------------------------------------------
+# Command handlers
+# ---------------------------------------------------------------------------
+
+def _handle_scan(writer: OutputWriter, args: argparse.Namespace) -> int:
+    result = run_scan(args.file, cloud=args.cloud)
+    min_severity = SEVERITY_CHOICES[args.severity]
+    displayed = filter_by_severity(result.findings, min_severity)
+
+    render_findings(writer, displayed)
+    render_risk_score(writer, result.risk)
+    render_blast_radius(writer, result.blast_radius, args.top)
+
+    # Send notification if requested
+    notify = getattr(args, "notify", None)
+    if notify:
+        webhook = getattr(args, "webhook", None)
+        writer.print(f"[bold cyan]Sending {notify.title()} notification...[/bold cyan]")
+        ok = send_notification(notify, result.findings, result.risk,
+                               args.cloud, args.file, webhook)
+        if not ok:
+            writer.print(
+                f"[yellow]Tip:[/yellow] Set env var "
+                f"CLOUDSENTRIX_SLACK_WEBHOOK or CLOUDSENTRIX_TEAMS_WEBHOOK, "
+                f"or pass --webhook <url>"
+            )
+
+    return determine_exit_code(result.findings)
+
+
+def _handle_blast_radius(writer: OutputWriter, args: argparse.Namespace) -> int:
+    result = run_scan(args.file, cloud=args.cloud)
+    match = find_blast_radius_for(result.blast_radius, args.principal)
+    if match is None:
+        writer.print(f"[bold red]Error:[/bold red] '{args.principal}' was not found in {args.file}.")
+        return 2
+    render_single_blast_radius(writer, match)
+    return 0
+
+
+def _handle_cross_cloud(writer: OutputWriter, args: argparse.Namespace) -> int:
+    """Cross-cloud attack chain detection."""
+    gcp_file   = getattr(args, "gcp", None)
+    aws_file   = getattr(args, "aws", None)
+    azure_file = getattr(args, "azure", None)
+
+    provided = [f for f in [gcp_file, aws_file, azure_file] if f]
+    if len(provided) < 2:
+        writer.print("[bold red]Error:[/bold red] Provide at least 2 cloud files.")
+        writer.print("  --gcp gcp.json --aws aws.json --azure azure.json")
+        return 2
+
+    writer.print("[bold cyan]Cross-Cloud Attack Chain Detection[/bold cyan]")
+    writer.print(f"  Clouds provided: {len(provided)}")
+
+    # Load each cloud
+    aws_graph = aws_findings_list = None
+    az_iam = az_findings_list = None
+    gcp_graph_obj = gcp_findings_list = None
+
+    if aws_file:
+        writer.print(f"  Loading AWS   : {aws_file}")
+        try:
+            from aws_parser import AWSIAMParser
+            from aws_graph import AWSIAMGraph
+            from aws_detection import AWSDetectionEngine
+            aws_policy   = AWSIAMParser().parse_file(aws_file)
+            aws_graph    = AWSIAMGraph.from_policy(aws_policy)
+            aws_findings_list = AWSDetectionEngine().run(aws_graph)
+        except Exception as exc:
+            writer.print(f"  [yellow]AWS load error:[/yellow] {exc}")
+
+    if azure_file:
+        writer.print(f"  Loading Azure : {azure_file}")
+        try:
+            from azure_parser import parse_azure_file
+            from azure_detection import run_azure_detections
+            az_iam = parse_azure_file(azure_file)
+            az_findings_list = run_azure_detections(az_iam)
+        except Exception as exc:
+            writer.print(f"  [yellow]Azure load error:[/yellow] {exc}")
+
+    if gcp_file:
+        writer.print(f"  Loading GCP   : {gcp_file}")
+        try:
+            from parser import GCPIAMParser
+            from graph import IAMGraph
+            from detection import DetectionEngine
+            gcp_policy = GCPIAMParser().parse_file(gcp_file)
+            gcp_graph_obj = IAMGraph.from_policy(gcp_policy)
+            gcp_findings_list = DetectionEngine().run(gcp_graph_obj)
+        except Exception as exc:
+            writer.print(f"  [yellow]GCP load error:[/yellow] {exc}")
+
+    writer.print("")
+    writer.print("[bold]Analyzing cross-cloud attack chains...[/bold]")
+
+    try:
+        chains = detect_cross_cloud_chains(
+            aws_graph=aws_graph,        aws_findings=aws_findings_list,
+            azure_iam=az_iam,           azure_findings=az_findings_list,
+            gcp_graph=gcp_graph_obj,    gcp_findings=gcp_findings_list,
+        )
+    except Exception as exc:
+        writer.print(f"[bold red]Error:[/bold red] {exc}")
+        return 2
+
+    if not chains:
+        writer.print("[bold green]No cross-cloud attack chains detected.[/bold green]")
+        writer.print("Clouds appear to be properly isolated.")
+        return 0
+
+    SEV_COLOR = {"CRITICAL": "red", "HIGH": "yellow", "MEDIUM": "blue"}
+    writer.print(f"[bold]── Cross-Cloud Attack Chains ({len(chains)} detected) ─────────[/bold]")
+    writer.print("")
+
+    for f in chains:
+        color = SEV_COLOR.get(f.severity, "white")
+        writer.print(f"[{color}][{f.severity}][/{color}] [bold]{f.finding_id}[/bold] — {f.title}")
+        writer.print(f"  Source  : {f.source_principal} ({f.source_cloud})")
+        writer.print(f"  Target  : {f.target_principal} ({f.target_cloud})")
+        writer.print(f"  Bridge  : {f.bridge_mechanism}")
+        writer.print(f"  MITRE   : {', '.join(f.mitre_techniques)}")
+        writer.print(f"  Impact  : {f.impact[:100]}")
+        writer.print("")
+        writer.print("  [bold]Attack Chain:[/bold]")
+        for step in f.attack_chain:
+            bridge = " [cyan][CROSS-CLOUD PIVOT][/cyan]" if step.is_bridge else ""
+            writer.print(f"    Step {step.step_number} [{step.cloud}]{bridge}")
+            writer.print(f"      {step.principal} → {step.action} → {step.target}")
+        writer.print("")
+        writer.print(f"  [bold]Remediation:[/bold] {f.remediation[:120]}")
+        writer.print("─" * 60)
+        writer.print("")
+
+    # Save output
+    output = getattr(args, "output", None)
+    if output:
+        import json as _json
+        from pathlib import Path as _Path
+        data = []
+        for f in chains:
+            data.append({
+                "finding_id": f.finding_id,
+                "title": f.title,
+                "severity": f.severity,
+                "source_cloud": f.source_cloud,
+                "target_cloud": f.target_cloud,
+                "source_principal": f.source_principal,
+                "target_principal": f.target_principal,
+                "bridge_mechanism": f.bridge_mechanism,
+                "mitre_techniques": list(f.mitre_techniques),
+                "impact": f.impact,
+                "remediation": f.remediation,
+                "attack_chain": [
+                    {
+                        "step": s.step_number,
+                        "cloud": s.cloud,
+                        "principal": s.principal,
+                        "action": s.action,
+                        "target": s.target,
+                        "is_bridge": s.is_bridge,
+                    } for s in f.attack_chain
+                ],
+            })
+        _Path(output).write_text(_json.dumps(data, indent=2), encoding="utf-8")
+        writer.print(f"[bold green]Saved:[/bold green] {output}")
+
+    critical = sum(1 for f in chains if f.severity == "CRITICAL")
+    return 1 if critical > 0 else 0
+
+
+def _handle_k8s(writer: OutputWriter, args: argparse.Namespace) -> int:
+    """Scan Kubernetes RBAC files for privilege-escalation risks."""
+    path = args.path
+    from pathlib import Path as _Path
+
+    writer.print(f"[bold cyan]Scanning Kubernetes RBAC:[/bold cyan] {path}")
+
+    try:
+        if _Path(path).is_dir():
+            findings = scan_k8s_directory(path)
+        else:
+            findings = scan_k8s_file(path)
+    except Exception as exc:
+        writer.print(f"[bold red]Error:[/bold red] {exc}")
+        return 2
+
+    if not findings:
+        writer.print("[bold green]No findings![/bold green] K8s RBAC looks clean.")
+        return 0
+
+    SEV_COLOR = {"CRITICAL": "red", "HIGH": "yellow", "MEDIUM": "blue", "LOW": "green"}
+    writer.print(f"[bold]── Kubernetes RBAC Findings ({len(findings)} total) ──────────[/bold]")
+    for f in findings:
+        color = SEV_COLOR.get(f.severity, "white")
+        writer.print(f"[{color}][{f.severity}][/{color}] [{color}]{f.rule_id}[/{color}] {f.title}")
+        writer.print(f"  Resource : {f.resource_kind}/{f.resource_name}")
+        writer.print(f"  Subject  : {f.subject}")
+        writer.print(f"  MITRE    : {f.mitre_technique}")
+        writer.print(f"  Details  : {f.description[:100]}")
+        writer.print(f"  Fix      : {f.remediation[:90]}")
+        writer.print("")
+
+    critical = sum(1 for f in findings if f.severity == "CRITICAL")
+    writer.print(f"[bold]Total: {len(findings)} finding(s) — {critical} CRITICAL[/bold]")
+
+    output = getattr(args, "output", None)
+    if output:
+        import json as _json
+        data = [{"rule_id": f.rule_id, "title": f.title, "severity": f.severity,
+                 "resource": f"{f.resource_kind}/{f.resource_name}",
+                 "subject": f.subject, "mitre": f.mitre_technique,
+                 "remediation": f.remediation} for f in findings]
+        _Path(output).write_text(_json.dumps(data, indent=2), encoding="utf-8")
+        writer.print(f"[bold green]Exported:[/bold green] {output}")
+
+    return 1 if critical > 0 else 0
+
+
+def _handle_terraform(writer: OutputWriter, args: argparse.Namespace) -> int:
+    """Scan Terraform .tf files and .tfstate files for IAM misconfigurations and secrets."""
+    path = args.path
+    from pathlib import Path as _Path
+
+    writer.print(f"[bold cyan]Scanning Terraform:[/bold cyan] {path}")
+
+    # Check if tfstate file
+    p = _Path(path)
+    if p.is_file() and p.suffix == ".tfstate":
+        writer.print("[bold]Mode:[/bold] Terraform State File (secret leak detection)")
+        try:
+            state_findings = scan_tfstate_file(path)
+        except Exception as exc:
+            writer.print(f"[bold red]Error:[/bold red] {exc}")
+            return 2
+
+        if not state_findings:
+            writer.print("[bold green]No secrets found in state file.[/bold green]")
+            return 0
+
+        writer.print(f"[bold]── State File Findings ({len(state_findings)} secrets found) ──[/bold]")
+        for f in state_findings:
+            writer.print(f"[red][CRITICAL][/red] [red]{f.rule_id}[/red] — {f.title}")
+            writer.print(f"  Resource : {f.resource_type}.{f.resource_name}")
+            writer.print(f"  Secret   : {f.secret_type}")
+            writer.print(f"  Evidence : {f.evidence}")
+            writer.print(f"  Fix      : {f.remediation[:100]}")
+            writer.print("")
+
+        output = getattr(args, "output", None)
+        if output:
+            import json as _json
+            data = [{"rule_id": f.rule_id, "resource": f"{f.resource_type}.{f.resource_name}",
+                     "secret_type": f.secret_type, "evidence": f.evidence,
+                     "remediation": f.remediation} for f in state_findings]
+            _Path(output).write_text(_json.dumps(data, indent=2), encoding="utf-8")
+            writer.print(f"[bold green]Exported:[/bold green] {output}")
+        return 1  # CRITICAL findings
+
+    writer.print("[bold]Mode:[/bold] Terraform IaC (.tf files)")
+    try:
+        if p.is_dir():
+            findings = scan_terraform_directory(path)
+        else:
+            findings = scan_terraform_file(path)
+    except Exception as exc:
+        writer.print(f"[bold red]Error:[/bold red] {exc}")
+        return 2
+
+    if not findings:
+        writer.print("[bold green]No findings![/bold green] Terraform files look clean.")
+        return 0
+
+    SEV_COLOR_TF = {"CRITICAL": "red", "HIGH": "yellow", "MEDIUM": "blue", "LOW": "green"}
+    writer.print(f"[bold]── Terraform Findings ({len(findings)} total) ─────────────────[/bold]")
+    for f in findings:
+        color = SEV_COLOR_TF.get(f.severity, "white")
+        writer.print(
+            f"[{color}][{f.severity}][/{color}] [{color}]{f.rule_id}[/{color}] {f.title}"
+        )
+        writer.print(f"  File    : {f.file_path}:{f.line_number}")
+        writer.print(f"  Resource: {f.resource_type}.{f.resource_name}")
+        writer.print(f"  MITRE   : {f.mitre_technique}")
+        writer.print(f"  Fix     : {f.remediation[:90]}")
+        writer.print("")
+
+    critical = sum(1 for f in findings if f.severity == "CRITICAL")
+    writer.print(f"[bold]Total: {len(findings)} finding(s) — {critical} CRITICAL[/bold]")
+
+    # Export if requested
+    output = getattr(args, "output", None)
+    if output:
+        import json as _json
+        data = [{
+            "rule_id": f.rule_id, "title": f.title, "severity": f.severity,
+            "file": f.file_path, "line": f.line_number,
+            "resource": f"{f.resource_type}.{f.resource_name}",
+            "mitre": f.mitre_technique, "remediation": f.remediation,
+        } for f in findings]
+        _Path(output).write_text(_json.dumps(data, indent=2), encoding="utf-8")
+        writer.print(f"[bold green]Exported:[/bold green] {output}")
+
+    return 1 if critical > 0 else 0
+
+
+def _handle_report_multi(writer: OutputWriter, args: argparse.Namespace) -> int:
+    """Generate a multi-cloud PDF report."""
+    gcp   = getattr(args, "gcp", None)
+    aws   = getattr(args, "aws", None)
+    azure = getattr(args, "azure", None)
+    out   = getattr(args, "output", "multi_cloud_report.pdf")
+    no_ai = getattr(args, "no_ai", True)
+
+    if not any([gcp, aws, azure]):
+        writer.print("[bold red]Error:[/bold red] Provide at least one cloud file.")
+        writer.print("  --gcp my_gcp.json  --aws my_aws.json  --azure my_azure.json")
+        return 2
+
+    writer.print("[bold cyan]Generating Multi-Cloud PDF Report...[/bold cyan]")
+    if gcp:   writer.print(f"  GCP   -> {gcp}")
+    if aws:   writer.print(f"  AWS   -> {aws}")
+    if azure: writer.print(f"  Azure -> {azure}")
+
+    try:
+        scanned, total = generate_multi_pdf(
+            gcp_file=gcp, aws_file=aws, azure_file=azure,
+            output_path=out, no_ai=no_ai,
+        )
+    except ImportError as exc:
+        writer.print(f"[bold red]Error:[/bold red] {exc}")
+        return 2
+    except Exception as exc:
+        writer.print(f"[bold red]Error:[/bold red] {exc}")
+        return 2
+
+    writer.print(f"[bold green]PDF generated![/bold green] {scanned} cloud(s) - {total} finding(s)")
+    writer.print(f"[bold green]Output:[/bold green] {out}")
+    return 0
+
+
+def _handle_dashboard(writer: OutputWriter, args: argparse.Namespace) -> int:
+    """Generate multi-cloud HTML dashboard."""
+    gcp   = getattr(args, "gcp", None)
+    aws   = getattr(args, "aws", None)
+    azure = getattr(args, "azure", None)
+    out   = getattr(args, "output", "multi_cloud_dashboard.html")
+
+    if not any([gcp, aws, azure]):
+        writer.print("[bold red]Error:[/bold red] Provide at least one cloud file.")
+        writer.print("  --gcp my_gcp.json  --aws my_aws.json  --azure my_azure.json")
+        return 2
+
+    writer.print("[bold cyan]Generating Multi-Cloud Dashboard...[/bold cyan]")
+    if gcp:
+        writer.print(f"  GCP   → {gcp}")
+    if aws:
+        writer.print(f"  AWS   → {aws}")
+    if azure:
+        writer.print(f"  Azure → {azure}")
+
+    try:
+        scanned, total = generate_multi_dashboard(
+            gcp_file=gcp,
+            aws_file=aws,
+            azure_file=azure,
+            output_path=out,
+        )
+    except Exception as exc:
+        writer.print(f"[bold red]Error:[/bold red] {exc}")
+        return 2
+
+    writer.print(
+        f"[bold green]Dashboard generated![/bold green] "
+        f"{scanned} cloud(s) - {total} finding(s)"
+    )
+    writer.print(f"[bold green]📄 Output:[/bold green] {out}")
+    writer.print("[dim]Open the file in your browser to view the dashboard.[/dim]")
+    return 0
+
+
+def _handle_rules(writer: OutputWriter) -> int:
+    render_rules_list(writer)
+    return 0
+
+
+def _handle_list_principals(writer: OutputWriter, args: argparse.Namespace) -> int:
+    graph = run_list_principals(args.file, cloud=args.cloud)
+    render_principals_list(writer, graph)
+    return 0
+
+
+def _handle_validate(writer: OutputWriter, args: argparse.Namespace) -> int:
+    cloud = getattr(args, "cloud", "gcp")
+    writer.print("[bold]── Validation ────────────────────────────────────────[/bold]")
+    if cloud == "aws":
+        try:
+            from aws_parser import AWSIAMParser, AWSParserError
+            policy = AWSIAMParser().parse_file(args.file)
+            stats = policy.summary()
+            writer.print(f"[bold green]VALID[/bold green] — {args.file} is a valid AWS IAM authorization-details export.")
+            writer.print(f"  Principals : {stats['total_principals']} ({stats['users']} users, {stats['groups']} groups, {stats['roles']} roles)")
+            writer.print(f"  Permissions: {stats['total_permissions']} total")
+        except Exception as exc:
+            writer.print(f"[bold red]INVALID[/bold red] — {exc}")
+            return 2
+        return 0
+    if cloud == "azure":
+        try:
+            iam = parse_azure_file(args.file)
+            unique = {a.principal_name for a in iam.assignments}
+            writer.print(f"[bold green]VALID[/bold green] — {args.file} is a valid Azure RBAC export.")
+            writer.print(f"  Assignments     : {len(iam.assignments)}")
+            writer.print(f"  Unique Principals: {len(unique)}")
+            writer.print(f"  Role Definitions : {len(iam.definitions)}")
+            writer.print(f"  Service Principals: {len(iam.service_principals)}")
+        except Exception as exc:
+            writer.print(f"[bold red]INVALID[/bold red] — {exc}")
+            return 2
+        return 0
+    if cloud == "azure-ad":
+        try:
+            ad = parse_azure_ad_file(args.file)
+            stats = ad.summary()
+            writer.print(f"[bold green]VALID[/bold green] — {args.file} is a valid Azure AD export.")
+            writer.print(f"  Apps            : {stats['total_apps']}")
+            writer.print(f"  Orphaned Apps   : {stats['orphaned_apps']}")
+            writer.print(f"  Multi-tenant    : {stats['multi_tenant_apps']}")
+            writer.print(f"  Service Principals: {stats['total_service_principals']}")
+        except Exception as exc:
+            writer.print(f"[bold red]INVALID[/bold red] — {exc}")
+            return 2
+        return 0
+    try:
+        policy, warnings = run_validate(args.file)
+    except IAMParserError as exc:
+        writer.print(f"[bold red]INVALID[/bold red] — {exc}")
+        return 2
+    render_validate(writer, args.file, policy, warnings)
+    return 0
+
+
+def _handle_score(writer: OutputWriter, args: argparse.Namespace) -> int:
+    result = run_scan(args.file, cloud=args.cloud)
+
+    if args.json:
+        payload = {
+            "score": result.risk.score,
+            "rating": result.risk.rating.value,
+            "findings": result.risk.finding_counts,
+        }
+        writer.print(json.dumps(payload))
+    else:
+        render_score_only(writer, result.risk)
+
+    if args.min_score is not None:
+        return 0 if result.risk.score >= args.min_score else 1
+    return determine_exit_code(result.findings)
+
+
+def _handle_compare(writer: OutputWriter, args: argparse.Namespace) -> int:
+    comparison = run_compare(args.old, args.new, cloud=args.cloud)
+    render_compare(writer, comparison)
+    new_critical = any(f.severity == Severity.CRITICAL for f in comparison.new_findings)
+    return 1 if new_critical else 0
+
+
+def _handle_principal_path(writer: OutputWriter, args: argparse.Namespace) -> int:
+    result, path = run_principal_path(args.file, args.source, args.target, cloud=args.cloud)
+    source_exists = result.graph.has_principal(args.source)
+    target_exists = result.graph.has_principal(args.target)
+
+    render_principal_path(writer, args.source, args.target, source_exists, target_exists, path)
+
+    if not source_exists or not target_exists:
+        return 2
+    return 1 if path is not None else 0
+
+
+def _handle_mitre_map(writer: OutputWriter, args: argparse.Namespace) -> int:
+    result = run_scan(args.file, cloud=args.cloud)
+    render_mitre_map(writer, result.findings)
+    return determine_exit_code(result.findings)
+
+
+def _handle_remediate(writer: OutputWriter, args: argparse.Namespace) -> int:
+    result = run_scan(args.file, cloud=args.cloud)
+    min_severity = SEVERITY_CHOICES[args.severity]
+    displayed = filter_by_severity(result.findings, min_severity)
+    render_remediate(writer, displayed, result.graph, args.project)
+    return determine_exit_code(result.findings)
+
+
+def _handle_watch(writer: OutputWriter, args: argparse.Namespace) -> int:
+    path = Path(args.path)
+    if not path.exists():
+        writer.print(f"[bold red]Error:[/bold red] '{args.path}' does not exist.")
+        return 2
+
+    min_severity = SEVERITY_CHOICES[args.severity]
+
+    def scan_and_render(file_path: Path) -> None:
+        writer.print(f"\n[bold cyan]── Change detected: {file_path} ──[/bold cyan]\n")
+        try:
+            result = run_scan(str(file_path), cloud=args.cloud)
+        except IAMParserError as exc:
+            writer.print(f"[bold red]Error:[/bold red] {exc}\n")
+            return
+        except GraphBuildError as exc:
+            writer.print(f"[bold red]Error building graph:[/bold red] {exc}\n")
+            return
+        displayed = filter_by_severity(result.findings, min_severity)
+        render_findings(writer, displayed)
+        render_risk_score(writer, result.risk)
+        render_blast_radius(writer, result.blast_radius, args.top)
+
+    writer.print(f"[bold]Watching {path} (every {args.interval:.1f}s) — press Ctrl+C to stop.[/bold]\n")
+
+    try:
+        if path.is_file():
+            scan_and_render(path)  # baseline scan up front; a directory has no single "current" target yet
+        watch_files(path, on_change=scan_and_render, poll_interval=args.interval)
+    except FileNotFoundError as exc:
+        writer.print(f"[bold red]Error:[/bold red] {exc}")
+        return 2
+    except KeyboardInterrupt:
+        pass
+
+    writer.print("\n[bold]Watch stopped.[/bold]")
+    return 0
+
+
+def _handle_export_azure(writer: OutputWriter, args: argparse.Namespace) -> int:
+    """Azure export — uses azure_exporter directly (supports JSON/CSV/SARIF/HTML)."""
+    try:
+        iam = parse_azure_file(args.file)
+    except Exception as exc:
+        writer.print(f"[bold red]Error parsing Azure file:[/bold red] {exc}")
+        return 2
+
+    az_findings = run_azure_detections(iam)
+    az_score = score_azure(az_findings, iam)
+    az_blast = calculate_azure_blast_radius(iam)
+
+    output_path = args.output or "azure_export.json"
+    try:
+        export_azure(az_findings, az_score, az_blast, iam, output_path)
+        writer.print(
+            f"[bold green]Exported[/bold green] {len(az_findings)} finding(s) "
+            f"-> {output_path}"
+        )
+    except Exception as exc:
+        writer.print(f"[bold red]Export error:[/bold red] {exc}")
+        return 2
+    return 0
+
+
+def _handle_export(writer: OutputWriter, args: argparse.Namespace) -> int:
+    cloud = getattr(args, "cloud", "gcp")
+    if cloud == "azure":
+        return _handle_export_azure(writer, args)
+    result, fmt, output_path = run_export(args.file, args.output, args.format, cloud=args.cloud)
+    writer.print(f"[bold green]Exported[/bold green] {len(result.findings)} finding(s) as {fmt.upper()} -> {output_path}")
+    return determine_exit_code(result.findings)
+
+
+def _handle_report(writer: OutputWriter, args: argparse.Namespace) -> int:
+    result = run_scan(args.file, cloud=args.cloud)
+
+    findings_dicts = [finding_to_dict(f) for f in result.findings]
+    blast_dicts = [blast_radius_to_dict(r) for r in result.blast_radius]
+
+    # AI summary — try Gemini first, fall back to template silently
+    ai_summary: str | None = None
+    if not args.no_ai:
+        try:
+            ai_summary = generate_ai_summary(
+                risk_score=result.risk.score,
+                rating=result.risk.rating.value,
+                finding_counts=result.risk.finding_counts,
+                top_findings=findings_dicts[:5],
+            )
+            writer.print("[bold green]AI summary generated via Gemini.[/bold green]")
+        except AISummaryError as exc:
+            writer.print(f"[yellow]Gemini unavailable ({exc}) — using built-in summary.[/yellow]")
+            ai_summary = build_fallback_summary(
+                result.risk.score, result.risk.rating.value, result.risk.finding_counts
+            )
+    else:
+        ai_summary = build_fallback_summary(
+            result.risk.score, result.risk.rating.value, result.risk.finding_counts
+        )
+
+    output_path = Path(args.output)
+    generate_pdf_report(
+        source_file=args.file,
+        risk_score=result.risk.score,
+        rating=result.risk.rating.value,
+        finding_counts=result.risk.finding_counts,
+        findings=findings_dicts,
+        blast_radius=blast_dicts,
+        output_path=output_path,
+        ai_summary=ai_summary,
+    )
+
+    writer.print(f"[bold green]Report saved:[/bold green] {output_path.resolve()}")
+    writer.print(
+        f"Findings: {result.risk.finding_counts['CRITICAL']} Critical, "
+        f"{result.risk.finding_counts['HIGH']} High, "
+        f"{result.risk.finding_counts['MEDIUM']} Medium, "
+        f"{result.risk.finding_counts['LOW']} Low"
+    )
+    writer.print(f"Score: {result.risk.score}/100 ({result.risk.rating.value})")
+    return determine_exit_code(result.findings)
+
+
+def _handle_live_scan(writer: OutputWriter, args: argparse.Namespace) -> int:
+    cloud = getattr(args, "cloud", "gcp")
+
+    # ── AWS live scan ────────────────────────────────────────────────────────
+    if cloud == "aws":
+        profile  = getattr(args, "profile", None)
+        region   = getattr(args, "region", "us-east-1")
+        endpoint = getattr(args, "endpoint", None)
+
+        writer.print(
+            f"[bold cyan]Fetching live AWS IAM data[/bold cyan] "
+            f"(profile={profile or 'default'}, region={region}"
+            + (f", endpoint={endpoint}" if endpoint else "") + ")"
+        )
+        try:
+            scanner = AWSLiveScanner()
+            aws_policy = scanner.scan(
+                profile=profile,
+                region=region,
+                endpoint_url=endpoint,
+                save_to=getattr(args, "save", None),
+            )
+        except AWSLiveScanError as exc:
+            writer.print(f"[bold red]AWS Error:[/bold red] {exc}")
+            return 2
+
+        stats = aws_policy.summary()
+        writer.print(
+            f"[bold green]Fetched:[/bold green] "
+            f"{stats['users']} user(s), {stats['groups']} group(s), "
+            f"{stats['roles']} role(s)"
+        )
+        if getattr(args, "save", None):
+            writer.print(f"[bold green]Saved to:[/bold green] {Path(args.save).resolve()}")
+
+        # Run detection on the fetched policy
+        from aws_graph import AWSIAMGraph as _AWSGraph
+        aws_graph = _AWSGraph.from_policy(aws_policy)
+        aws_findings = AWSDetectionEngine().run(aws_graph)
+        gcp_findings = _aws_findings_to_gcp(aws_findings)
+        risk = RiskScorer().score(gcp_findings)
+
+        min_severity = SEVERITY_CHOICES[args.severity]
+        displayed = filter_by_severity(gcp_findings, min_severity)
+        render_findings(writer, displayed)
+        render_risk_score(writer, risk)
+        return determine_exit_code(gcp_findings)
+
+    # ── Azure live scan ─────────────────────────────────────────────────────
+    if cloud == "azure":
+        subscription = getattr(args, "subscription", None)
+        writer.print(
+            f"[bold cyan]Fetching live Azure RBAC data[/bold cyan] "
+            f"(subscription={subscription or 'current active'})"
+        )
+        try:
+            iam = fetch_azure_live(
+                subscription=subscription,
+                save_path=getattr(args, "save", None),
+            )
+        except SystemExit:
+            return 2
+        except Exception as exc:
+            writer.print(f"[bold red]Azure Error:[/bold red] {exc}")
+            return 2
+
+        unique = {a.principal_name for a in iam.assignments}
+        writer.print(
+            f"[bold green]Fetched:[/bold green] "
+            f"{len(iam.assignments)} assignment(s), {len(unique)} unique principal(s)"
+        )
+        az_findings = run_azure_detections(iam)
+        az_score = score_azure(az_findings, iam)
+        gcp_findings = _azure_findings_to_gcp(az_findings)
+        risk = RiskScorer().score(gcp_findings)
+        min_severity = SEVERITY_CHOICES[args.severity]
+        displayed = filter_by_severity(gcp_findings, min_severity)
+        render_findings(writer, displayed)
+        render_risk_score(writer, risk)
+        return determine_exit_code(gcp_findings)
+
+    # ── GCP live scan (original, unchanged) ──────────────────────────────────
+    writer.print(f"[bold cyan]Fetching live IAM policy for project:[/bold cyan] [bold]{args.project}[/bold]")
+    try:
+        policy_data = fetch_live_iam_policy(args.project)
+    except LiveScanError as exc:
+        writer.print(f"[bold red]Error:[/bold red] {exc}")
+        return 2
+
+    writer.print(f"[bold green]Policy fetched:[/bold green] {len(policy_data.get('bindings', []))} binding(s) found.")
+
+    if args.save:
+        save_path = Path(args.save)
+        save_policy_to_file(policy_data, save_path)
+        writer.print(f"[bold green]Saved to:[/bold green] {save_path.resolve()}")
+
+    import tempfile, os
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as tmp:
+        import json as _json
+        _json.dump(policy_data, tmp)
+        tmp_path = tmp.name
+
+    try:
+        result = run_scan(tmp_path, cloud=args.cloud)
+    except Exception as exc:
+        writer.print(f"[bold red]Scan error:[/bold red] {exc}")
+        return 2
+    finally:
+        os.unlink(tmp_path)
+
+    min_severity = SEVERITY_CHOICES[args.severity]
+    displayed = filter_by_severity(result.findings, min_severity)
+    render_findings(writer, displayed)
+    render_risk_score(writer, result.risk)
+    render_blast_radius(writer, result.blast_radius, args.top)
+    return determine_exit_code(result.findings)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
+
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+
+    writer = OutputWriter(Console(), use_color=not getattr(args, "no_color", False))
+    if not getattr(args, "no_banner", False):
+        render_banner(writer)
+
+    try:
+        if args.command == "scan":
+            return _handle_scan(writer, args)
+        if args.command == "blast-radius":
+            return _handle_blast_radius(writer, args)
+        if args.command == "cross-cloud":
+            return _handle_cross_cloud(writer, args)
+        if args.command == "k8s":
+            return _handle_k8s(writer, args)
+        if args.command == "terraform":
+            return _handle_terraform(writer, args)
+        if args.command == "report-multi":
+            return _handle_report_multi(writer, args)
+        if args.command == "dashboard":
+            return _handle_dashboard(writer, args)
+        if args.command == "rules":
+            return _handle_rules(writer)
+        if args.command == "list-principals":
+            return _handle_list_principals(writer, args)
+        if args.command == "validate":
+            return _handle_validate(writer, args)
+        if args.command == "score":
+            return _handle_score(writer, args)
+        if args.command == "compare":
+            return _handle_compare(writer, args)
+        if args.command == "principal-path":
+            return _handle_principal_path(writer, args)
+        if args.command == "mitre-map":
+            return _handle_mitre_map(writer, args)
+        if args.command == "remediate":
+            return _handle_remediate(writer, args)
+        if args.command == "export":
+            return _handle_export(writer, args)
+        if args.command == "watch":
+            return _handle_watch(writer, args)
+        if args.command == "report":
+            return _handle_report(writer, args)
+        if args.command == "live-scan":
+            return _handle_live_scan(writer, args)
+
+        parser.print_help()
+        return 2
+
+    except IAMParserError as exc:
+        writer.print(f"[bold red]Error:[/bold red] {exc}")
+        return 2
+    except GraphBuildError as exc:
+        writer.print(f"[bold red]Error building graph:[/bold red] {exc}")
+        return 2
+    except ValueError as exc:
+        writer.print(f"[bold red]Error:[/bold red] {exc}")
+        return 2
+    except Exception:
+        logger.exception("Unexpected error.")
+        writer.print("[bold red]An unexpected error occurred. See logs for details.[/bold red]")
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
