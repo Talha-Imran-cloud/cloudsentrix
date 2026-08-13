@@ -1,12 +1,14 @@
 """Entry point for pip-installed cloudsentrix command."""
-import os, sys
+import os
+import sys
 
-# Add the package directory to path so all modules are importable
-_pkg_dir = os.path.dirname(os.path.abspath(__file__))
-if _pkg_dir not in sys.path:
-    sys.path.insert(0, _pkg_dir)
+# Add cloudsentrix package directory to path
+# This makes all sibling modules (parser, graph, etc.) importable
+_here = os.path.dirname(os.path.abspath(__file__))
+if _here not in sys.path:
+    sys.path.insert(0, _here)
 
 from cli import main
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

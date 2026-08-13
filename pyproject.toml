@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cloudsentrix"
-version = "2.0.0"
+version = "2.0.2"
 description = "Multi-Cloud IAM Attack-Path Analyzer — GCP, AWS, Azure, K8s, Terraform"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -60,10 +60,8 @@ Documentation = "https://github.com/Talha-Imran-cloud/cloudsentrix#readme"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-dir]
-"" = "src"
+include = ["cloudsentrix*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src/cloudsentrix", "src"]
