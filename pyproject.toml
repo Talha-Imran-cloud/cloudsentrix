@@ -4,17 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cloudsentrix"
-version = "1.0.0"
-description = "GCP IAM Privilege-Escalation Attack-Path Analyzer — Free open-source alternative to Wiz/Orca"
+version = "2.0.0"
+description = "Multi-Cloud IAM Attack-Path Analyzer — GCP, AWS, Azure, K8s, Terraform"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
-    { name = "Talha Imran", email = "talha@example.com" }
+    { name = "Talha Imran", email = "talhaimran20008@gmail.com" }
 ]
 keywords = [
-    "gcp", "iam", "security", "cloud", "privilege-escalation",
-    "attack-path", "pentest", "soc", "mitre", "wiz", "orca"
+    "gcp", "aws", "azure", "iam", "security", "cloud", "kubernetes",
+    "terraform", "privilege-escalation", "attack-path", "pentest",
+    "soc", "mitre", "wiz", "orca", "devsecops"
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -31,14 +32,10 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    # Core analysis
     "networkx>=3.0",
     "rich>=13.0",
-    # PDF report generation
     "reportlab>=4.0",
-    # File watcher (watch command)
     "watchdog>=3.0",
-    # Live GCP scanning
     "requests>=2.31",
     "google-auth>=2.0",
     "google-api-python-client>=2.0",
@@ -53,10 +50,10 @@ dev = [
 ]
 
 [project.scripts]
-cloudsentrix = "cli:main"
+cloudsentrix = "cloudsentrix.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/Talha-Imran-cloud/cloudsentrix"
+Homepage = "https://cloudsentrix.netlify.app/"
 Repository = "https://github.com/Talha-Imran-cloud/cloudsentrix"
 "Bug Tracker" = "https://github.com/Talha-Imran-cloud/cloudsentrix/issues"
 Documentation = "https://github.com/Talha-Imran-cloud/cloudsentrix#readme"
@@ -66,6 +63,9 @@ where = ["src"]
 
 [tool.setuptools.package-dir]
 "" = "src"
+
+[tool.setuptools.package-data]
+"cloudsentrix" = ["*.json", "sample_data/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

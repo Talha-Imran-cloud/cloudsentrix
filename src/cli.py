@@ -35,6 +35,24 @@ Exit codes:
 
 from __future__ import annotations
 
+import os as _os
+import sys as _sys
+
+# Make src/ importable both when running directly and after pip install
+def _setup_path():
+    """Ensure all cloudsentrix modules are importable."""
+    # When installed via pip: modules are in cloudsentrix package
+    # When run directly from src/: modules are in same directory
+    _here = _os.path.dirname(_os.path.abspath(__file__))
+    if _here not in _sys.path:
+        _sys.path.insert(0, _here)
+    # Also try parent/src
+    _parent_src = _os.path.join(_os.path.dirname(_here), 'src')
+    if _os.path.isdir(_parent_src) and _parent_src not in _sys.path:
+        _sys.path.insert(0, _parent_src)
+
+_setup_path()
+
 import argparse
 import csv
 import json
@@ -588,7 +606,7 @@ def blast_radius_to_dict(r: BlastRadiusResult) -> dict:
     return {
         "principal_id": r.principal_id,
         "percentage": r.percentage,
-        "total_others": r.total_others,
+        "total_others": getattr(r, "total_others", getattr(r, "total_principals", 0)),
         "reachable_principals": list(r.reachable_principals),
     }
 
@@ -1019,7 +1037,7 @@ def build_html_export(result: "ScanResult") -> str:
     at_risk = [r for r in result.blast_radius if r.percentage > 0]
     sa_at_risk = sum(
         1 for r in at_risk
-        if (p := graph.get_principal(r.principal_id)) is not None and p.member_type.value == "serviceAccount"
+        if (p := graph.get_principal(r.principal_id)) is not None and getattr(p, "member_type", None) is not None and p.member_type.value == "serviceAccount"
     )
     max_blast = max((r.percentage for r in result.blast_radius), default=0.0)
     overview_html = (
@@ -1556,7 +1574,8 @@ def render_blast_radius(writer: OutputWriter, results: list, top_n: int) -> None
 def render_single_blast_radius(writer: OutputWriter, result: BlastRadiusResult) -> None:
     reaches = ", ".join(result.reachable_principals) if result.reachable_principals else "(nothing further)"
     writer.print(f"[bold]{result.principal_id}[/bold]")
-    writer.print(f"Blast radius : [bold]{result.percentage:.1f}%[/bold] of {result.total_others} other principal(s)")
+    total_o = getattr(result, "total_others", getattr(result, "total_principals", 0))
+    writer.print(f"Blast radius : [bold]{result.percentage:.1f}%[/bold] of {total_o} other principal(s)")
     writer.print(f"Can reach    : {reaches}\n")
 
 

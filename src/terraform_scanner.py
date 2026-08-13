@@ -26,6 +26,7 @@ Public API
 
 from __future__ import annotations
 
+import json
 import re
 import os
 from dataclasses import dataclass, field
