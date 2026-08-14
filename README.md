@@ -14,6 +14,8 @@
 
 **Multi-Cloud IAM Attack-Path Analyzer**
 
+<img src="cloudsentrix-website.png" alt="CloudSentrix Website" width="100%"/>
+
 Open-source CLI that scans GCP, AWS, Azure, Kubernetes, and Terraform for privilege-escalation risks.
 40 detection rules · Blast radius · MITRE ATT&CK · Cross-cloud chains · CI/CD ready.
 **The free alternative to Wiz and Orca.**
