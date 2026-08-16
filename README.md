@@ -44,6 +44,7 @@ Open-source CLI that scans GCP, AWS, Azure, Kubernetes, and Terraform for privil
 | 🏗️ Terraform IaC + State | 11 | — | — | — | — |
 | ☸️ Kubernetes RBAC | 6 | — | — | — | — |
 | 🌐 Cross-Cloud Chains | industry-first | — | — | — | ✅ JSON |
+| 🖥️ **Local Web Dashboard** | — | — | — | ✅ **Flask** `serve` | — |
 | **Total** | **40 rules** | | | | |
 
 ---
@@ -188,6 +189,50 @@ cloudsentrix k8s --path k8s_rbac.json
 cloudsentrix k8s --path /path/to/manifests/
 cloudsentrix k8s --path k8s_rbac.json --output findings.json
 ```
+
+---
+
+### `serve` — Local Web Dashboard (Flask) 🆕
+
+> **Requires Flask:** `pip install flask`
+
+Start an interactive browser-based security dashboard running locally at `http://127.0.0.1:5000`
+
+**Linux / macOS:**
+```bash
+# Install Flask (one-time)
+pip install flask
+
+# Start the local dashboard
+cloudsentrix serve
+
+# Custom port
+cloudsentrix serve --port 8080
+
+# Open automatically in browser
+cloudsentrix serve --open
+```
+
+**Windows (PowerShell):**
+```powershell
+# Install Flask (one-time)
+pip install flask
+
+# Start the local dashboard
+cloudsentrix serve
+
+# Custom port
+cloudsentrix serve --port 8080
+```
+
+**Dashboard features:**
+- 🖥️ Drop your IAM file directly in the browser (GCP, AWS, Azure, Azure AD)
+- 📊 Live security score with animated ring chart
+- 🔴 Severity breakdown — CRITICAL / HIGH / MEDIUM findings
+- ☁️ Cloud coverage map
+- 🔍 Filterable findings table — filter by cloud or severity
+- 🔒 Runs entirely on `localhost` — no data leaves your machine
+- 🆓 Competes with Prowler's paid dashboard tier — at zero cost
 
 ---
 
@@ -594,6 +639,7 @@ cloudsentrix/
 │   │   ├── cross_cloud_detector.py # Cross-cloud chains
 │   │   ├── multi_dashboard.py    # Multi-cloud dashboard
 │   │   ├── multi_pdf_report.py   # Multi-cloud PDF
+│   │   ├── web_server.py         # Local Web Dashboard (Flask) — NEW
 │   │   └── notifier.py           # Slack/Teams alerts
 ├── ci-templates/
 │   ├── github-actions-gcp.yml
@@ -633,7 +679,7 @@ cloudsentrix/
 | Slack / Teams Alerts | ✅ Shipped |
 | CI/CD Templates | ✅ Shipped |
 | Gemini AI Summaries | ✅ Shipped |
-| Local Web Dashboard (Flask) | 🔄 Planned |
+| Local Web Dashboard (Flask) — `cloudsentrix serve` | ✅ Shipped |
 
 ---
 
