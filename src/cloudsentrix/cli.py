@@ -104,6 +104,8 @@ from aws_blast_radius import calculate_aws_blast_radius, AWSBlastResult
 # Cross-Cloud Attack Chain Detection
 from cross_cloud_detector import detect_cross_cloud_chains, CrossCloudFinding
 
+# Local Web Dashboard — imported lazily in handler
+
 # Terraform Scanner
 from terraform_scanner import (scan_terraform_file, scan_terraform_directory, get_terraform_rules, TerraformFinding,
     scan_tfstate_file, get_tfstate_rules, TfstateFinding)
@@ -1818,6 +1820,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     blast_parser.add_argument("--no-color", action="store_true", help="Disable colored output.")
     blast_parser.add_argument("--no-banner", action="store_true", help="Skip the startup banner.")
 
+    # serve command
+    serve_parser = subparsers.add_parser("serve", help="Start local web dashboard at http://localhost:5000")
+    serve_parser.add_argument("--host", default="127.0.0.1", help="Host (default: 127.0.0.1)")
+    serve_parser.add_argument("--port", type=int, default=5000, help="Port (default: 5000)")
+    serve_parser.add_argument("--no-color", action="store_true")
+    serve_parser.add_argument("--no-banner", action="store_true")
+
     # cross-cloud command
     cc_parser = subparsers.add_parser(
         "cross-cloud",
@@ -2097,6 +2106,24 @@ def _handle_blast_radius(writer: OutputWriter, args: argparse.Namespace) -> int:
         writer.print(f"[bold red]Error:[/bold red] '{args.principal}' was not found in {args.file}.")
         return 2
     render_single_blast_radius(writer, match)
+    return 0
+
+
+def _handle_serve(writer: OutputWriter, args: argparse.Namespace) -> int:
+    """Start local web dashboard."""
+    import importlib, sys as _sys, os as _os
+    _here = _os.path.dirname(_os.path.abspath(__file__))
+    if _here not in _sys.path:
+        _sys.path.insert(0, _here)
+    try:
+        from web_server import run_server
+    except ImportError as e:
+        writer.print(f"[bold red]Error:[/bold red] {e}")
+        writer.print("Make sure web_server.py is in src/cloudsentrix/")
+        return 2
+    host = getattr(args, "host", "127.0.0.1")
+    port = getattr(args, "port", 5000)
+    run_server(host=host, port=port)
     return 0
 
 
@@ -2813,6 +2840,8 @@ def main(argv: list[str] | None = None) -> int:
             return _handle_scan(writer, args)
         if args.command == "blast-radius":
             return _handle_blast_radius(writer, args)
+        if args.command == "serve":
+            return _handle_serve(writer, args)
         if args.command == "cross-cloud":
             return _handle_cross_cloud(writer, args)
         if args.command == "k8s":
